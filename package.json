@@ -1,0 +1,399 @@
+{
+  "name": "dream-cpp-debuger",
+  "displayName": "Dream C++ Debugger (GDB)",
+  "description": "现代简洁的 C/C++ GDB 调试器扩展 —— 零配置一键编译调试、现代化侧边栏面板、STL/数组可视化、条件断点、标准输入(stdin)注入与行内变量实时预览。",
+  "version": "1.0.0",
+  "publisher": "wudream",
+  "author": {
+    "name": "wudream813"
+  },
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Debuggers",
+    "Programming Languages",
+    "Visualization"
+  ],
+  "keywords": [
+    "c++",
+    "cpp",
+    "gdb",
+    "debugger",
+    "debug",
+    "oi",
+    "competitive-programming",
+    "algorithm",
+    "visualizer",
+    "调试器"
+  ],
+  "icon": "media/icon.png",
+  "activationEvents": [
+    "onLanguage:cpp",
+    "onLanguage:c",
+    "onView:dream-cpp-debug.sidebar",
+    "onDebugResolve:dream-cpp-gdb",
+    "onCommand:dream-cpp-debug.startDebug"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "dream-cpp-debug",
+          "title": "Dream C++ Debugger",
+          "icon": "media/activity-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "dream-cpp-debug": [
+        {
+          "id": "dream-cpp-debug.sidebar",
+          "name": "GDB 调试工作台",
+          "type": "webview",
+          "visibility": "visible"
+        }
+      ]
+    },
+    "breakpoints": [
+      {
+        "language": "cpp"
+      },
+      {
+        "language": "c"
+      }
+    ],
+    "debuggers": [
+      {
+        "type": "dream-cpp-gdb",
+        "label": "Dream C++ GDB Debugger",
+        "languages": [
+          "cpp",
+          "c"
+        ],
+        "configurationAttributes": {
+          "launch": {
+            "required": [],
+            "properties": {
+              "program": {
+                "type": "string",
+                "description": "要调试的可执行文件或 C/C++ 源文件路径（默认使用当前活动编辑器文件自动编译）",
+                "default": "${file}"
+              },
+              "args": {
+                "type": "array",
+                "description": "传递给程序的命令行参数",
+                "default": []
+              },
+              "stdin": {
+                "type": "string",
+                "description": "注入给程序标准输入 (stdin) 的测试数据",
+                "default": ""
+              },
+              "cwd": {
+                "type": "string",
+                "description": "调试工作目录",
+                "default": "${fileDirname}"
+              },
+              "gdbPath": {
+                "type": "string",
+                "description": "GDB 可执行文件路径",
+                "default": "gdb"
+              },
+              "compilerPath": {
+                "type": "string",
+                "description": "C++ 编译器路径",
+                "default": "g++"
+              },
+              "compileFlags": {
+                "type": "array",
+                "description": "编译参数",
+                "default": [
+                  "-g",
+                  "-O0",
+                  "-Wall",
+                  "-std=c++17"
+                ]
+              },
+              "stopAtMain": {
+                "type": "boolean",
+                "description": "启动后是否在 main 函数入口自动暂停",
+                "default": true
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "dream-cpp-gdb",
+            "request": "launch",
+            "name": "Dream GDB: 编译并调试当前 C++ 文件",
+            "program": "${file}",
+            "cwd": "${fileDirname}",
+            "stopAtMain": true
+          }
+        ],
+        "configurationSnippets": [
+          {
+            "label": "Dream GDB: 调试当前 C/C++ 文件",
+            "description": "使用 Dream C++ Debugger 自动编译并通过 GDB 调试当前源文件",
+            "body": {
+              "type": "dream-cpp-gdb",
+              "request": "launch",
+              "name": "Dream GDB: 调试当前文件",
+              "program": "${file}",
+              "cwd": "${fileDirname}",
+              "stopAtMain": true
+            }
+          }
+        ]
+      }
+    ],
+    "commands": [
+      {
+        "command": "dream-cpp-debug.startDebug",
+        "title": "Dream C++ Debug: 编译并开始 GDB 调试",
+        "icon": "$(debug-alt)"
+      },
+      {
+        "command": "dream-cpp-debug.compileAndRun",
+        "title": "Dream C++ Debug: 快速编译并运行",
+        "icon": "$(play)"
+      },
+      {
+        "command": "dream-cpp-debug.continue",
+        "title": "Dream C++ Debug: 继续运行 (Continue)",
+        "icon": "$(debug-continue)"
+      },
+      {
+        "command": "dream-cpp-debug.pause",
+        "title": "Dream C++ Debug: 暂停执行 (Pause)",
+        "icon": "$(debug-pause)"
+      },
+      {
+        "command": "dream-cpp-debug.stepOver",
+        "title": "Dream C++ Debug: 单步跳过 (Step Over)",
+        "icon": "$(debug-step-over)"
+      },
+      {
+        "command": "dream-cpp-debug.stepInto",
+        "title": "Dream C++ Debug: 单步进入 (Step Into)",
+        "icon": "$(debug-step-into)"
+      },
+      {
+        "command": "dream-cpp-debug.stepOut",
+        "title": "Dream C++ Debug: 单步跳出 (Step Out)",
+        "icon": "$(debug-step-out)"
+      },
+      {
+        "command": "dream-cpp-debug.restart",
+        "title": "Dream C++ Debug: 重新开始调试 (Restart)",
+        "icon": "$(debug-restart)"
+      },
+      {
+        "command": "dream-cpp-debug.stop",
+        "title": "Dream C++ Debug: 停止调试 (Stop)",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "dream-cpp-debug.runToCursor",
+        "title": "Dream C++ Debug: 运行到光标处 (Run to Cursor)",
+        "icon": "$(debug-step-back)"
+      },
+      {
+        "command": "dream-cpp-debug.toggleBreakpoint",
+        "title": "Dream C++ Debug: 切换当前行断点 (Toggle Breakpoint)"
+      },
+      {
+        "command": "dream-cpp-debug.addConditionalBreakpoint",
+        "title": "Dream C++ Debug: 添加/编辑条件断点..."
+      },
+      {
+        "command": "dream-cpp-debug.addWatch",
+        "title": "Dream C++ Debug: 添加选中表达式到监视 (Add to Watch)"
+      },
+      {
+        "command": "dream-cpp-debug.evaluateSelection",
+        "title": "Dream C++ Debug: 立即求值选中表达式 (Evaluate Expression)"
+      },
+      {
+        "command": "dream-cpp-debug.clearBreakpoints",
+        "title": "Dream C++ Debug: 清除所有断点"
+      },
+      {
+        "command": "dream-cpp-debug.openSidebar",
+        "title": "Dream C++ Debug: 打开侧边栏调试工作台"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "dream-cpp-debug.startDebug",
+          "when": "editorLangId == cpp || editorLangId == c",
+          "group": "navigation@1"
+        },
+        {
+          "command": "dream-cpp-debug.compileAndRun",
+          "when": "editorLangId == cpp || editorLangId == c",
+          "group": "navigation@2"
+        },
+        {
+          "command": "dream-cpp-debug.stepOver",
+          "when": "dreamCppDebug.paused && (editorLangId == cpp || editorLangId == c)",
+          "group": "navigation@3"
+        },
+        {
+          "command": "dream-cpp-debug.continue",
+          "when": "dreamCppDebug.paused && (editorLangId == cpp || editorLangId == c)",
+          "group": "navigation@4"
+        },
+        {
+          "command": "dream-cpp-debug.stop",
+          "when": "dreamCppDebug.active && (editorLangId == cpp || editorLangId == c)",
+          "group": "navigation@5"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "dream-cpp-debug.runToCursor",
+          "when": "editorLangId == cpp || editorLangId == c",
+          "group": "dreamdebug@1"
+        },
+        {
+          "command": "dream-cpp-debug.addWatch",
+          "when": "editorLangId == cpp || editorLangId == c",
+          "group": "dreamdebug@2"
+        },
+        {
+          "command": "dream-cpp-debug.addConditionalBreakpoint",
+          "when": "editorLangId == cpp || editorLangId == c",
+          "group": "dreamdebug@3"
+        },
+        {
+          "command": "dream-cpp-debug.evaluateSelection",
+          "when": "editorLangId == cpp || editorLangId == c",
+          "group": "dreamdebug@4"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "dream-cpp-debug.startDebug",
+          "when": "view == dream-cpp-debug.sidebar && !dreamCppDebug.active",
+          "group": "navigation@1"
+        },
+        {
+          "command": "dream-cpp-debug.restart",
+          "when": "view == dream-cpp-debug.sidebar && dreamCppDebug.active",
+          "group": "navigation@1"
+        },
+        {
+          "command": "dream-cpp-debug.stop",
+          "when": "view == dream-cpp-debug.sidebar && dreamCppDebug.active",
+          "group": "navigation@2"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "dream-cpp-debug.startDebug",
+        "key": "ctrl+shift+f5",
+        "mac": "cmd+shift+f5",
+        "when": "editorLangId == cpp || editorLangId == c"
+      },
+      {
+        "command": "dream-cpp-debug.continue",
+        "key": "f5",
+        "when": "dreamCppDebug.paused"
+      },
+      {
+        "command": "dream-cpp-debug.stepOver",
+        "key": "f10",
+        "when": "dreamCppDebug.paused"
+      },
+      {
+        "command": "dream-cpp-debug.stepInto",
+        "key": "f11",
+        "when": "dreamCppDebug.paused"
+      },
+      {
+        "command": "dream-cpp-debug.stepOut",
+        "key": "shift+f11",
+        "when": "dreamCppDebug.paused"
+      },
+      {
+        "command": "dream-cpp-debug.stop",
+        "key": "shift+f5",
+        "when": "dreamCppDebug.active"
+      },
+      {
+        "command": "dream-cpp-debug.runToCursor",
+        "key": "ctrl+f10",
+        "mac": "cmd+f10",
+        "when": "editorLangId == cpp || editorLangId == c"
+      }
+    ],
+    "configuration": {
+      "title": "Dream C++ Debugger (GDB)",
+      "properties": {
+        "dreamCppDebug.gdbPath": {
+          "type": "string",
+          "default": "gdb",
+          "description": "GDB 可执行文件路径（如 gdb 或 C:\\mingw64\\bin\\gdb.exe）"
+        },
+        "dreamCppDebug.compilerPath": {
+          "type": "string",
+          "default": "g++",
+          "description": "C++ 编译器可执行文件路径（如 g++ 或 clang++）"
+        },
+        "dreamCppDebug.compileFlags": {
+          "type": "array",
+          "default": [
+            "-g",
+            "-O0",
+            "-Wall",
+            "-std=c++17"
+          ],
+          "description": "编译 C/C++ 源文件时附加的编译参数（必须包含 -g 以生成调试符号）"
+        },
+        "dreamCppDebug.stopAtMain": {
+          "type": "boolean",
+          "default": true,
+          "description": "启动调试时是否默认在 main 函数入口处自动断点暂停"
+        },
+        "dreamCppDebug.showInlineValues": {
+          "type": "boolean",
+          "default": true,
+          "description": "在编辑器当前函数代码行尾实时显示变量内联值（如 // x = 42, sum = 105）"
+        },
+        "dreamCppDebug.enableHoverEval": {
+          "type": "boolean",
+          "default": true,
+          "description": "调试暂停时将鼠标悬停在代码变量上自动通过 GDB 计算值与类型"
+        },
+        "dreamCppDebug.enableCodeLens": {
+          "type": "boolean",
+          "default": true,
+          "description": "在 main 函数上方显示「▶ GDB 调试」与「⚡ 编译运行」快捷 CodeLens"
+        },
+        "dreamCppDebug.maxArrayPreview": {
+          "type": "number",
+          "default": 16,
+          "description": "侧边栏数组/STL 可视化卡片默认展示的最大元素数量"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "test": "node tests/run-tests.js",
+    "vscode:prepublish": "echo 'Ready to publish Dream C++ Debugger'"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/wudream813/dream-cpp-debuger"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@vscode/vsce": "^3.0.0"
+  }
+}

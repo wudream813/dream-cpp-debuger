@@ -1,0 +1,7 @@
+node_modules/
+.dream-debug/
+*.vsix
+*.out
+*.exe
+.DS_Store
+Thumbs.db

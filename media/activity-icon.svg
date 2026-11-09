@@ -1,0 +1,8 @@
+<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Outer hexagonal shield / C-ring -->
+  <path d="M12 2.25L4.5 6.5V14.2C4.5 18.15 7.68 21.1 12 21.75C16.32 21.1 19.5 18.15 19.5 14.2V6.5L12 2.25Z" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- Play / Step triangle inside -->
+  <path d="M9.5 8.5L15.25 12L9.5 15.5V8.5Z" fill="currentColor"/>
+  <!-- Plus badges representing C++ -->
+  <path d="M16.2 7.5H18.2M17.2 6.5V8.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+</svg>
