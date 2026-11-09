@@ -2,6 +2,15 @@
 
 All notable changes to the **Dream C++ Debugger (GDB)** extension will be documented in this file.
 
+## [1.0.1] - 2026-11-09
+
+### Fixed & Improved
+- **大幅提升侧边栏对比度与可读性**：重构深色（`vscode-dark`）与浅色（`vscode-light`）双主题高对比度配色方案，强化卡片边框（`1.5px` 实线）、按钮字重、变量名/变量值/数组格子对比度，确保在各类 VS Code 主题下清晰醒目。
+- **严格区分编译警告 (`Warning`) 与编译错误 (`CE`)**：
+  - 修复侧边栏将编译器 `warning`（如 `unused variable 'dp' [-Wunused-variable]`）渲染为红色 `✖` 错误卡片的问题。
+  - 编译器 `warning` 现使用琥珀黄警告样式（`⚠ [警告] ... · 不影响调试`）并支持一键关闭，绝不阻塞 GDB 调试会话启动；仅当存在真正的编译错误（`exitCode != 0`）时才显示红色 `✖ 编译错误 (CE)`。
+  - 默认编译参数移除强制 `-Wall`（改为 `["-g", "-O0", "-std=c++17"]`），避免调试时临时定义的观察变量触发多余的未使用变量警告，同时新增中文 GCC 输出（`错误:` / `警告:`）解析支持。
+
 ## [1.0.0] - 2026-11-09
 
 ### Added

@@ -86,19 +86,22 @@ async function runAllTests() {
   assert.strictEqual(isSourceFile('/path/to/main.cpp'), true);
   assert.strictEqual(isSourceFile('/path/to/binary.out'), false);
 
-  const sampleStderr = `/tmp/test.cpp:14:9: error: 'undeclaredVar' was not declared in this scope\n/tmp/test.cpp:8:6: warning: unused variable 'unused' [-Wunused-variable]`;
+  const sampleStderr = `/tmp/test.cpp:14:9: error: 'undeclaredVar' was not declared in this scope\n/tmp/test.cpp:8:6: warning: unused variable 'unused' [-Wunused-variable]\n/tmp/test.cpp:23:9: 警告: unused variable 'dp' [-Wunused-variable]`;
   const diags = parseCompilerDiagnostics(sampleStderr);
-  assert.strictEqual(diags.length, 2);
+  assert.strictEqual(diags.length, 3);
   assert.strictEqual(diags[0].line, 14);
   assert.strictEqual(diags[0].severity, 'error');
   assert.strictEqual(diags[1].severity, 'warning');
-  ok('parseCompilerDiagnostics extracts line, column, severity, and message');
+  assert.strictEqual(diags[2].severity, 'warning');
+  ok('parseCompilerDiagnostics strictly separates error (CE) vs warning (English & Chinese GCC)');
 
   const demoSource = path.join(__dirname, '..', 'examples', 'demo_debug.cpp');
   const compileRes = await compileSourceFile(demoSource);
   assert.strictEqual(compileRes.success, true, `Compile failed: ${compileRes.stderr}`);
+  assert.strictEqual(compileRes.errors.length, 0, 'Expected 0 compile errors');
+  assert.strictEqual(compileRes.warnings.length, 0, 'Default compileFlags should not trigger unused-variable warning');
   assert.ok(fs.existsSync(compileRes.executable));
-  ok(`compileSourceFile compiled examples/demo_debug.cpp (${compileRes.durationMs} ms)`);
+  ok(`compileSourceFile compiled examples/demo_debug.cpp cleanly (${compileRes.durationMs} ms)`);
 
   const runRes = await runExecutable(compileRes.executable, { stdin: '6\n' });
   assert.strictEqual(runRes.exitCode, 0);
@@ -219,7 +222,11 @@ async function runAllTests() {
   assert.ok(html.includes('调用栈 (Call Stack)'));
   assert.ok(html.includes('断点管理 (支持条件断点)'));
   assert.ok(html.includes('GDB 命令台 & CPU 寄存器'));
-  ok('getSidebarHtml renders all modern sidebar cards and controls');
+  assert.ok(html.includes('body.vscode-light'));
+  assert.ok(html.includes('body.vscode-dark'));
+  assert.ok(html.includes('diag-warning'));
+  assert.ok(html.includes('diag-error'));
+  ok('getSidebarHtml renders high-contrast dark/light palettes and distinct warning/error banners');
 
   console.log(`\n🎉 All ${passed} tests passed!`);
 }

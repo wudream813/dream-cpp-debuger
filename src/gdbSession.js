@@ -120,7 +120,9 @@ class GDBSession extends EventEmitter {
       }
     });
 
+    let spawnError = null;
     this.proc.on('error', (err) => {
+      spawnError = err;
       this.state = 'error';
       this.emit('output', {
         category: 'system',
@@ -149,11 +151,21 @@ class GDBSession extends EventEmitter {
     this._startOutputWatcher();
 
     // Initialize GDB session settings
-    await this.sendCommand('-enable-pretty-printing').catch(() => {});
+    try {
+      await this.sendCommand('-enable-pretty-printing');
+    } catch (err) {
+      if (spawnError || !this.proc || !this.stdinFile) {
+        throw new Error(`未找到或无法启动 GDB (${this.gdbPath})，请确认系统已安装 GDB 并加入 PATH`);
+      }
+    }
     await this.sendCommand('-gdb-set print elements 64').catch(() => {});
     await this.sendCommand('-gdb-set print repeats 32').catch(() => {});
     await this.sendCommand('-gdb-set pagination off').catch(() => {});
     await this.sendCommand('-gdb-set confirm off').catch(() => {});
+
+    if (spawnError || !this.stdinFile || !this.stdoutFile) {
+      throw new Error(`未找到或无法启动 GDB (${this.gdbPath})，请确认系统已安装 GDB 并加入 PATH`);
+    }
 
     // Sync any pre-registered user breakpoints into GDB
     await this._syncAllBreakpointsToGdb();

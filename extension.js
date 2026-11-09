@@ -194,14 +194,14 @@ class DreamDebugController {
 
     const compileResult = await compileSourceFile(sourceFile, {
       compilerPath: this.config.get('compilerPath', 'g++'),
-      compileFlags: this.config.get('compileFlags', ['-g', '-O0', '-Wall', '-std=c++17'])
+      compileFlags: this.config.get('compileFlags', ['-g', '-O0', '-std=c++17'])
     });
 
     this.applyCompilerDiagnostics(sourceFile, compileResult);
 
     if (!compileResult.success) {
       this.updateStatusBar('idle');
-      vscode.window.showErrorMessage(`编译失败，请查看侧边栏或“问题 (Problems)”面板中的错误详情。`);
+      vscode.window.showErrorMessage(`编译失败 (CE)，请查看侧边栏或“问题 (Problems)”面板中的错误详情。`);
       return;
     }
 
@@ -245,12 +245,12 @@ class DreamDebugController {
 
     const compileResult = await compileSourceFile(sourceFile, {
       compilerPath: this.config.get('compilerPath', 'g++'),
-      compileFlags: this.config.get('compileFlags', ['-g', '-O0', '-Wall', '-std=c++17'])
+      compileFlags: this.config.get('compileFlags', ['-g', '-O0', '-std=c++17'])
     });
 
     this.applyCompilerDiagnostics(sourceFile, compileResult);
     if (!compileResult.success) {
-      vscode.window.showErrorMessage('C/C++ 编译失败，请查看错误提示。');
+      vscode.window.showErrorMessage('C/C++ 编译失败 (CE)，请查看错误提示。');
       return;
     }
 
@@ -273,7 +273,8 @@ class DreamDebugController {
     const list = compileResult.diagnostics || [];
     this.sidebarProvider.postMessage({
       type: 'compileDiagnostics',
-      diagnostics: list
+      diagnostics: list,
+      success: compileResult.success
     });
 
     if (list.length === 0) return;

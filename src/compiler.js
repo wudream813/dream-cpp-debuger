@@ -10,7 +10,7 @@ const fs = require('fs');
 const os = require('os');
 
 const SOURCE_EXTS = new Set(['.cpp', '.cc', '.cxx', '.c++', '.c']);
-const DIAG_REGEX = /^(.+?):(\d+):(?:(\d+):)?\s*(fatal error|error|warning|note):\s*(.+)$/i;
+const DIAG_REGEX = /^(.+?):(\d+):(?:(\d+):)?\s*(fatal error|error|warning|note|致命错误|错误|警告|附注):\s*(.+)$/i;
 
 function isSourceFile(filePath) {
   if (!filePath) return false;
@@ -20,6 +20,7 @@ function isSourceFile(filePath) {
 
 /**
  * Parse GCC / Clang stderr output into structured diagnostic objects.
+ * Strictly separates compile errors ('error') from warnings ('warning') and notes ('info').
  */
 function parseCompilerDiagnostics(stderrText, defaultFile = '') {
   const diagnostics = [];
@@ -29,11 +30,12 @@ function parseCompilerDiagnostics(stderrText, defaultFile = '') {
     const m = line.match(DIAG_REGEX);
     if (m) {
       const rawSeverity = m[4].toLowerCase();
-      const severity = rawSeverity.includes('error')
-        ? 'error'
-        : rawSeverity === 'warning'
-        ? 'warning'
-        : 'info';
+      let severity = 'info';
+      if (rawSeverity.includes('error') || rawSeverity.includes('错误')) {
+        severity = 'error';
+      } else if (rawSeverity.includes('warning') || rawSeverity.includes('警告')) {
+        severity = 'warning';
+      }
       diagnostics.push({
         file: m[1].trim() || defaultFile,
         line: Math.max(1, parseInt(m[2], 10)),
@@ -64,7 +66,7 @@ function compileSourceFile(sourceFile, options = {}) {
 
     const userFlags = Array.isArray(options.compileFlags)
       ? [...options.compileFlags]
-      : ['-g', '-O0', '-Wall', '-std=c++17'];
+      : ['-g', '-O0', '-std=c++17'];
 
     // Filter out C++ standard flags when compiling plain C with gcc
     const flags = ext === '.c'
@@ -85,6 +87,11 @@ function compileSourceFile(sourceFile, options = {}) {
 
     const exeName = process.platform === 'win32' ? `${baseName}.exe` : `${baseName}.debug.out`;
     const outputBinary = options.outputBinary || path.join(outDir, exeName);
+
+    // Remove stale binary before compiling so we never mistake an old binary for a fresh compile
+    if (fs.existsSync(outputBinary)) {
+      try { fs.unlinkSync(outputBinary); } catch (_) {}
+    }
 
     const args = [...flags, absSource, '-o', outputBinary];
     const commandLine = `${compiler} ${args.map((a) => (a.includes(' ') ? `"${a}"` : a)).join(' ')}`;
@@ -139,6 +146,8 @@ function compileSourceFile(sourceFile, options = {}) {
 
     proc.on('close', (code) => {
       const diagnostics = parseCompilerDiagnostics(stderr, absSource);
+      const errors = diagnostics.filter((d) => d.severity === 'error');
+      const warnings = diagnostics.filter((d) => d.severity === 'warning');
       const success = code === 0 && fs.existsSync(outputBinary);
       resolve({
         success,
@@ -148,7 +157,9 @@ function compileSourceFile(sourceFile, options = {}) {
         stdout,
         stderr,
         durationMs: Date.now() - startTime,
-        diagnostics
+        diagnostics,
+        errors,
+        warnings
       });
     });
   });

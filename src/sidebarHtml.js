@@ -1,8 +1,8 @@
 /**
- * Dream C++ Debugger — Modern Clean Sidebar Webview UI
- * Adaptive to VS Code Dark/Light themes with glassmorphic cards,
- * 1D array/vector visual strips, live variable editing, stdin/stdout panel,
- * conditional breakpoints, call stack switcher, and interactive GDB console.
+ * Dream C++ Debugger — High-Contrast Modern Clean Sidebar Webview UI
+ * Adaptive to both VS Code Dark (`vscode-dark`) and Light (`vscode-light`) themes
+ * with crisp borders, high-contrast typography, 1D array/vector visual strips,
+ * distinct Warning vs Compile Error (CE) banners, and full GDB controls.
  */
 'use strict';
 
@@ -17,24 +17,122 @@ function getSidebarHtml(options = {}) {
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Dream C++ Debugger</title>
   <style nonce="${nonce}">
-    :root {
-      --bg-base: var(--vscode-sideBar-background, #0f141f);
-      --bg-card: var(--vscode-editorWidget-background, rgba(30, 41, 59, 0.52));
-      --bg-elevated: var(--vscode-input-background, rgba(15, 23, 42, 0.68));
-      --bg-hover: var(--vscode-list-hoverBackground, rgba(99, 102, 241, 0.12));
-      --fg-main: var(--vscode-sideBar-foreground, #e2e8f0);
-      --fg-muted: var(--vscode-descriptionForeground, #94a3b8);
-      --border-color: var(--vscode-sideBarSectionHeader-border, rgba(148, 163, 184, 0.16));
-      --accent: #6366f1;
-      --accent-hover: #4f46e5;
-      --accent-glow: rgba(99, 102, 241, 0.24);
-      --emerald: #10b981;
-      --amber: #f59e0b;
-      --rose: #f43f5e;
-      --sky: #38bdf8;
-      --violet: #a855f7;
-      --font-sans: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif);
-      --font-mono: var(--vscode-editor-font-family, "JetBrains Mono", "Fira Code", Consolas, monospace);
+    /* ── Default / Dark Theme High-Contrast Palette ── */
+    :root,
+    body.vscode-dark,
+    body.vscode-high-contrast {
+      --bg-base: #121620;
+      --bg-card: #1b2232;
+      --bg-card-header: #232c40;
+      --bg-elevated: #141a26;
+      --bg-hover: #2a354d;
+      --bg-input: #0f141e;
+
+      --fg-main: #f8fafc;
+      --fg-secondary: #dbeafe;
+      --fg-muted: #cbd5e1;
+
+      --border-strong: #475569;
+      --border-subtle: #334155;
+      --border-focus: #6366f1;
+
+      --accent: #4f46e5;
+      --accent-hover: #4338ca;
+      --accent-text: #ffffff;
+
+      --var-name-color: #38bdf8;
+      --var-val-color: #4ade80;
+      --var-str-color: #fb923c;
+      --var-ptr-color: #c084fc;
+      --var-type-bg: #334155;
+      --var-type-fg: #f1f5f9;
+
+      --badge-bg: #3730a3;
+      --badge-fg: #e0e7ff;
+
+      --paused-bg: rgba(245, 158, 11, 0.22);
+      --paused-border: #f59e0b;
+      --paused-fg: #fef08a;
+
+      --running-bg: rgba(16, 185, 129, 0.22);
+      --running-border: #10b981;
+      --running-fg: #a7f3d0;
+
+      --error-bg: rgba(225, 29, 72, 0.25);
+      --error-border: #f43f5e;
+      --error-fg: #fecdd3;
+
+      --warn-bg: rgba(217, 119, 6, 0.22);
+      --warn-border: #f59e0b;
+      --warn-fg: #fde68a;
+
+      --array-cell-bg: #1e293b;
+      --array-cell-border: #6366f1;
+      --array-idx-fg: #cbd5e1;
+      --array-val-fg: #ffffff;
+
+      --output-bg: #0b0f17;
+      --output-fg: #f1f5f9;
+
+      --font-sans: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif);
+      --font-mono: var(--vscode-editor-font-family, "JetBrains Mono", "Cascadia Code", "Fira Code", Consolas, monospace);
+    }
+
+    /* ── Light Theme High-Contrast Palette ── */
+    body.vscode-light,
+    body.vscode-high-contrast-light {
+      --bg-base: #f1f5f9;
+      --bg-card: #ffffff;
+      --bg-card-header: #e2e8f0;
+      --bg-elevated: #f8fafc;
+      --bg-hover: #dbeafe;
+      --bg-input: #ffffff;
+
+      --fg-main: #0f172a;
+      --fg-secondary: #1e293b;
+      --fg-muted: #334155;
+
+      --border-strong: #94a3b8;
+      --border-subtle: #cbd5e1;
+      --border-focus: #4f46e5;
+
+      --accent: #4f46e5;
+      --accent-hover: #3730a3;
+      --accent-text: #ffffff;
+
+      --var-name-color: #0369a1;
+      --var-val-color: #15803d;
+      --var-str-color: #c2410c;
+      --var-ptr-color: #6d28d9;
+      --var-type-bg: #e2e8f0;
+      --var-type-fg: #0f172a;
+
+      --badge-bg: #e0e7ff;
+      --badge-fg: #1e3a8a;
+
+      --paused-bg: #fef3c7;
+      --paused-border: #d97706;
+      --paused-fg: #78350f;
+
+      --running-bg: #d1fae5;
+      --running-border: #059669;
+      --running-fg: #064e3b;
+
+      --error-bg: #ffe4e6;
+      --error-border: #e11d48;
+      --error-fg: #881337;
+
+      --warn-bg: #fef3c7;
+      --warn-border: #d97706;
+      --warn-fg: #78350f;
+
+      --array-cell-bg: #eef2ff;
+      --array-cell-border: #6366f1;
+      --array-idx-fg: #334155;
+      --array-val-fg: #0f172a;
+
+      --output-bg: #0f172a;
+      --output-fg: #f8fafc;
     }
 
     * {
@@ -45,8 +143,8 @@ function getSidebarHtml(options = {}) {
 
     body {
       font-family: var(--font-sans);
-      font-size: 12.5px;
-      line-height: 1.45;
+      font-size: 13px;
+      line-height: 1.5;
       color: var(--fg-main);
       background: var(--bg-base);
       padding: 10px;
@@ -56,12 +154,12 @@ function getSidebarHtml(options = {}) {
 
     /* ── Top Hero / Target Status Card ── */
     .hero-card {
-      background: linear-gradient(145deg, rgba(99, 102, 241, 0.13) 0%, rgba(16, 185, 129, 0.06) 100%), var(--bg-card);
-      border: 1px solid var(--border-color);
+      background: var(--bg-card);
+      border: 1.5px solid var(--border-strong);
       border-radius: 10px;
-      padding: 11px 12px;
+      padding: 12px;
       margin-bottom: 10px;
-      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
     }
 
     .hero-top {
@@ -69,75 +167,77 @@ function getSidebarHtml(options = {}) {
       align-items: center;
       justify-content: space-between;
       gap: 8px;
-      margin-bottom: 8px;
+      margin-bottom: 10px;
     }
 
     .brand-row {
       display: flex;
       align-items: center;
-      gap: 7px;
+      gap: 8px;
       min-width: 0;
     }
 
     .brand-dot {
-      width: 9px;
-      height: 9px;
+      width: 10px;
+      height: 10px;
       border-radius: 50%;
       background: #64748b;
+      border: 1.5px solid rgba(255, 255, 255, 0.4);
       flex-shrink: 0;
       transition: all 0.25s ease;
     }
     .brand-dot.running {
-      background: var(--emerald);
-      box-shadow: 0 0 10px var(--emerald);
+      background: #10b981;
+      box-shadow: 0 0 10px #10b981;
       animation: pulseDot 1.4s infinite;
     }
     .brand-dot.paused {
-      background: var(--amber);
-      box-shadow: 0 0 10px var(--amber);
+      background: #f59e0b;
+      box-shadow: 0 0 10px #f59e0b;
     }
     .brand-dot.error {
-      background: var(--rose);
-      box-shadow: 0 0 10px var(--rose);
+      background: #f43f5e;
+      box-shadow: 0 0 10px #f43f5e;
     }
 
     @keyframes pulseDot {
       0%, 100% { transform: scale(1); opacity: 1; }
-      50% { transform: scale(1.25); opacity: 0.7; }
+      50% { transform: scale(1.25); opacity: 0.75; }
     }
 
     .file-title {
-      font-weight: 600;
-      font-size: 13px;
+      font-weight: 700;
+      font-size: 13.5px;
+      color: var(--fg-main);
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
     }
 
     .status-pill {
-      font-size: 11px;
-      font-weight: 600;
-      padding: 2px 8px;
+      font-size: 11.5px;
+      font-weight: 700;
+      padding: 2px 9px;
       border-radius: 999px;
-      background: rgba(100, 116, 139, 0.2);
-      color: var(--fg-muted);
+      background: var(--bg-card-header);
+      color: var(--fg-main);
       white-space: nowrap;
-      border: 1px solid rgba(148, 163, 184, 0.18);
+      border: 1px solid var(--border-strong);
     }
     .status-pill.paused {
-      background: rgba(245, 158, 11, 0.16);
-      color: #fbbf24;
-      border-color: rgba(245, 158, 11, 0.35);
+      background: var(--paused-bg);
+      color: var(--paused-fg);
+      border-color: var(--paused-border);
     }
     .status-pill.running {
-      background: rgba(16, 185, 129, 0.16);
-      color: #34d399;
-      border-color: rgba(16, 185, 129, 0.35);
+      background: var(--running-bg);
+      color: var(--running-fg);
+      border-color: var(--running-border);
     }
     .status-pill.error {
-      background: rgba(244, 63, 94, 0.16);
-      color: #fb7185;
-      border-color: rgba(244, 63, 94, 0.35);
+      background: var(--error-bg);
+      color: var(--error-fg);
+      border-color: var(--error-border);
     }
 
     .location-banner {
@@ -146,13 +246,14 @@ function getSidebarHtml(options = {}) {
       justify-content: space-between;
       gap: 6px;
       font-family: var(--font-mono);
-      font-size: 11.5px;
-      background: rgba(245, 158, 11, 0.11);
-      border: 1px solid rgba(245, 158, 11, 0.28);
-      color: #fcd34d;
-      padding: 5px 8px;
-      border-radius: 6px;
-      margin-bottom: 8px;
+      font-size: 12px;
+      font-weight: 600;
+      background: var(--paused-bg);
+      border: 1.5px solid var(--paused-border);
+      color: var(--paused-fg);
+      padding: 6px 9px;
+      border-radius: 7px;
+      margin-bottom: 9px;
       cursor: pointer;
     }
     .location-banner.visible {
@@ -162,7 +263,7 @@ function getSidebarHtml(options = {}) {
     .primary-actions {
       display: grid;
       grid-template-columns: 1fr auto;
-      gap: 6px;
+      gap: 7px;
     }
 
     .btn {
@@ -170,46 +271,45 @@ function getSidebarHtml(options = {}) {
       align-items: center;
       justify-content: center;
       gap: 5px;
-      border: 1px solid var(--border-color);
-      background: var(--bg-elevated);
+      border: 1.5px solid var(--border-strong);
+      background: var(--bg-card-header);
       color: var(--fg-main);
       font-family: inherit;
-      font-size: 12px;
-      font-weight: 500;
-      padding: 6px 10px;
+      font-size: 12.5px;
+      font-weight: 600;
+      padding: 7px 11px;
       border-radius: 7px;
       cursor: pointer;
       transition: all 0.15s ease;
     }
     .btn:hover:not(:disabled) {
       background: var(--bg-hover);
-      border-color: rgba(99, 102, 241, 0.45);
+      border-color: var(--border-focus);
     }
     .btn:disabled {
-      opacity: 0.4;
+      opacity: 0.5;
       cursor: not-allowed;
     }
     .btn-primary {
-      background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%);
-      color: #ffffff;
-      border-color: rgba(255, 255, 255, 0.15);
-      font-weight: 600;
-      box-shadow: 0 2px 10px var(--accent-glow);
+      background: var(--accent);
+      color: var(--accent-text);
+      border-color: #818cf8;
+      font-weight: 700;
     }
     .btn-primary:hover:not(:disabled) {
-      background: linear-gradient(135deg, #4f46e5 0%, #4338ca 100%);
-      border-color: rgba(255, 255, 255, 0.28);
+      background: var(--accent-hover);
+      border-color: #a5b4fc;
     }
 
     /* ── Transport Step Controls Toolbar ── */
     .transport-bar {
       display: grid;
       grid-template-columns: repeat(6, 1fr);
-      gap: 4px;
+      gap: 5px;
       background: var(--bg-card);
-      border: 1px solid var(--border-color);
+      border: 1.5px solid var(--border-strong);
       border-radius: 9px;
-      padding: 5px;
+      padding: 6px;
       margin-bottom: 10px;
     }
 
@@ -218,43 +318,50 @@ function getSidebarHtml(options = {}) {
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      gap: 2px;
-      padding: 5px 2px;
+      gap: 3px;
+      padding: 6px 2px;
       border-radius: 6px;
-      border: 1px solid transparent;
-      background: transparent;
+      border: 1px solid var(--border-subtle);
+      background: var(--bg-elevated);
       color: var(--fg-main);
       cursor: pointer;
-      font-size: 10px;
+      font-size: 11px;
+      font-weight: 600;
       transition: all 0.14s ease;
     }
     .ctrl-btn svg {
-      width: 15px;
-      height: 15px;
+      width: 16px;
+      height: 16px;
     }
     .ctrl-btn:hover:not(:disabled) {
       background: var(--bg-hover);
-      border-color: rgba(99, 102, 241, 0.3);
+      border-color: var(--border-focus);
+      transform: translateY(-1px);
     }
     .ctrl-btn:disabled {
-      opacity: 0.32;
+      opacity: 0.55;
       cursor: not-allowed;
     }
-    .ctrl-btn.danger:hover:not(:disabled) {
-      background: rgba(244, 63, 94, 0.15);
+    .ctrl-btn.danger:not(:disabled) {
       color: #fb7185;
-      border-color: rgba(244, 63, 94, 0.35);
+      border-color: rgba(244, 63, 94, 0.45);
+    }
+    .ctrl-btn.danger:hover:not(:disabled) {
+      background: var(--error-bg);
+      color: var(--error-fg);
+      border-color: var(--error-border);
     }
     .ctrl-btn.continue-btn:not(:disabled) {
-      color: var(--emerald);
+      color: #34d399;
+      border-color: rgba(16, 185, 129, 0.45);
     }
 
     /* ── Collapsible Section Cards ── */
     .section-card {
       background: var(--bg-card);
-      border: 1px solid var(--border-color);
+      border: 1.5px solid var(--border-strong);
       border-radius: 9px;
-      margin-bottom: 9px;
+      margin-bottom: 10px;
       overflow: hidden;
     }
 
@@ -262,14 +369,14 @@ function getSidebarHtml(options = {}) {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding: 7px 10px;
+      padding: 8px 11px;
       cursor: pointer;
-      background: rgba(255, 255, 255, 0.015);
+      background: var(--bg-card-header);
       border-bottom: 1px solid transparent;
       transition: background 0.15s ease;
     }
     .section-card.open .section-header {
-      border-bottom-color: var(--border-color);
+      border-bottom-color: var(--border-strong);
     }
     .section-header:hover {
       background: var(--bg-hover);
@@ -278,17 +385,15 @@ function getSidebarHtml(options = {}) {
     .section-title {
       display: flex;
       align-items: center;
-      gap: 6px;
-      font-weight: 600;
-      font-size: 11.5px;
-      letter-spacing: 0.02em;
-      text-transform: uppercase;
+      gap: 7px;
+      font-weight: 700;
+      font-size: 12.5px;
       color: var(--fg-main);
     }
 
     .chevron {
-      font-size: 10px;
-      color: var(--fg-muted);
+      font-size: 11px;
+      color: var(--fg-main);
       transition: transform 0.18s ease;
     }
     .section-card.open .chevron {
@@ -297,16 +402,18 @@ function getSidebarHtml(options = {}) {
 
     .badge-count {
       font-family: var(--font-mono);
-      font-size: 10.5px;
-      padding: 1px 6px;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 1px 7px;
       border-radius: 999px;
-      background: rgba(99, 102, 241, 0.18);
-      color: #a5b4fc;
+      background: var(--badge-bg);
+      color: var(--badge-fg);
+      border: 1px solid var(--border-subtle);
     }
 
     .section-body {
       display: none;
-      padding: 8px 10px;
+      padding: 9px 10px;
     }
     .section-card.open .section-body {
       display: block;
@@ -321,14 +428,14 @@ function getSidebarHtml(options = {}) {
 
     .var-item {
       background: var(--bg-elevated);
-      border: 1px solid var(--border-color);
+      border: 1.5px solid var(--border-subtle);
       border-radius: 7px;
-      padding: 6px 8px;
+      padding: 7px 9px;
       transition: all 0.2s ease;
     }
     .var-item.changed {
-      border-color: rgba(245, 158, 11, 0.55);
-      background: rgba(245, 158, 11, 0.08);
+      border-color: var(--paused-border);
+      background: var(--paused-bg);
     }
 
     .var-main {
@@ -347,116 +454,125 @@ function getSidebarHtml(options = {}) {
 
     .var-name {
       font-family: var(--font-mono);
-      font-weight: 600;
-      color: var(--sky);
-      font-size: 12px;
+      font-weight: 700;
+      color: var(--var-name-color);
+      font-size: 12.5px;
     }
 
     .var-type {
       font-family: var(--font-mono);
-      font-size: 10px;
-      padding: 1px 5px;
+      font-size: 10.5px;
+      font-weight: 600;
+      padding: 1px 6px;
       border-radius: 4px;
-      background: rgba(148, 163, 184, 0.14);
-      color: var(--fg-muted);
+      background: var(--var-type-bg);
+      color: var(--var-type-fg);
       white-space: nowrap;
     }
 
     .var-changed-tag {
-      font-size: 9.5px;
+      font-size: 10px;
       font-weight: 700;
-      padding: 0 4px;
-      border-radius: 3px;
-      background: rgba(245, 158, 11, 0.22);
-      color: #fbbf24;
+      padding: 1px 5px;
+      border-radius: 4px;
+      background: var(--paused-border);
+      color: #0f172a;
     }
 
     .var-right {
       display: flex;
       align-items: center;
-      gap: 5px;
+      gap: 6px;
       min-width: 0;
     }
 
     .var-val {
       font-family: var(--font-mono);
-      font-size: 12px;
-      color: #34d399;
+      font-size: 12.5px;
+      font-weight: 700;
+      color: var(--var-val-color);
       word-break: break-all;
       user-select: text;
     }
-    .var-val.string { color: #fb923c; }
-    .var-val.pointer { color: #c084fc; }
+    .var-val.string { color: var(--var-str-color); }
+    .var-val.pointer { color: var(--var-ptr-color); }
 
     .icon-action {
-      background: transparent;
-      border: none;
-      color: var(--fg-muted);
+      background: var(--bg-card-header);
+      border: 1px solid var(--border-subtle);
+      color: var(--fg-main);
       cursor: pointer;
-      padding: 2px 4px;
+      padding: 2px 6px;
       border-radius: 4px;
       font-size: 11px;
+      font-weight: 600;
     }
     .icon-action:hover {
-      color: var(--fg-main);
-      background: rgba(255, 255, 255, 0.08);
+      background: var(--bg-hover);
+      border-color: var(--border-focus);
     }
 
     /* 1D Visual Array Strip */
     .array-strip {
       display: flex;
-      gap: 4px;
+      gap: 5px;
       overflow-x: auto;
-      margin-top: 6px;
-      padding-bottom: 3px;
+      margin-top: 7px;
+      padding-bottom: 4px;
     }
     .array-cell {
       display: flex;
       flex-direction: column;
       align-items: center;
-      min-width: 34px;
-      border: 1px solid rgba(99, 102, 241, 0.28);
+      min-width: 38px;
+      border: 1.5px solid var(--array-cell-border);
       border-radius: 5px;
-      background: rgba(99, 102, 241, 0.08);
-      padding: 2px 5px;
+      background: var(--array-cell-bg);
+      padding: 3px 6px;
       font-family: var(--font-mono);
     }
     .array-idx {
-      font-size: 9px;
-      color: var(--fg-muted);
-      border-bottom: 1px solid rgba(148, 163, 184, 0.15);
+      font-size: 10px;
+      font-weight: 600;
+      color: var(--array-idx-fg);
+      border-bottom: 1px solid var(--border-subtle);
       width: 100%;
       text-align: center;
-      margin-bottom: 1px;
+      margin-bottom: 2px;
     }
     .array-v {
-      font-size: 11px;
-      font-weight: 600;
-      color: #e2e8f0;
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--array-val-fg);
     }
 
     /* ── Input Row (Watch / GDB Console / Stdin) ── */
     .input-row {
       display: flex;
-      gap: 5px;
-      margin-bottom: 7px;
+      gap: 6px;
+      margin-bottom: 8px;
     }
     .text-input, .textarea-input {
       width: 100%;
-      background: var(--bg-elevated);
-      border: 1px solid var(--border-color);
+      background: var(--bg-input);
+      border: 1.5px solid var(--border-strong);
       color: var(--fg-main);
       font-family: var(--font-mono);
-      font-size: 11.5px;
-      padding: 5px 8px;
+      font-size: 12px;
+      padding: 6px 9px;
       border-radius: 6px;
       outline: none;
     }
+    .text-input::placeholder, .textarea-input::placeholder {
+      color: var(--fg-muted);
+      opacity: 0.85;
+    }
     .text-input:focus, .textarea-input:focus {
-      border-color: var(--accent);
+      border-color: var(--border-focus);
+      box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.25);
     }
     .textarea-input {
-      min-height: 58px;
+      min-height: 62px;
       resize: vertical;
       user-select: text;
     }
@@ -467,84 +583,90 @@ function getSidebarHtml(options = {}) {
       align-items: center;
       justify-content: space-between;
       gap: 6px;
-      padding: 5px 7px;
+      padding: 6px 8px;
       border-radius: 6px;
       background: var(--bg-elevated);
-      border: 1px solid var(--border-color);
+      border: 1.5px solid var(--border-subtle);
       margin-bottom: 5px;
       cursor: pointer;
       transition: all 0.14s ease;
     }
     .stack-item:hover, .bp-item:hover {
-      border-color: rgba(99, 102, 241, 0.45);
+      border-color: var(--border-focus);
       background: var(--bg-hover);
     }
     .stack-item.active {
-      border-color: rgba(245, 158, 11, 0.55);
-      background: rgba(245, 158, 11, 0.1);
+      border-color: var(--paused-border);
+      background: var(--paused-bg);
     }
 
     .frame-badge {
       font-family: var(--font-mono);
-      font-size: 10.5px;
-      padding: 1px 5px;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 1px 6px;
       border-radius: 4px;
-      background: rgba(99, 102, 241, 0.2);
-      color: #a5b4fc;
+      background: var(--badge-bg);
+      color: var(--badge-fg);
     }
 
     .mono-loc {
       font-family: var(--font-mono);
-      font-size: 11px;
+      font-size: 11.5px;
+      font-weight: 600;
       color: var(--fg-muted);
     }
 
     .cond-pill {
       font-family: var(--font-mono);
-      font-size: 10px;
-      padding: 1px 5px;
+      font-size: 10.5px;
+      font-weight: 700;
+      padding: 1px 6px;
       border-radius: 4px;
-      background: rgba(168, 85, 247, 0.18);
-      color: #d8b4fe;
+      background: var(--badge-bg);
+      color: var(--badge-fg);
     }
 
     /* ── Output & Console Box ── */
     .output-box {
       font-family: var(--font-mono);
-      font-size: 11.5px;
-      background: rgba(9, 13, 22, 0.65);
-      border: 1px solid var(--border-color);
+      font-size: 12px;
+      font-weight: 500;
+      background: var(--output-bg);
+      border: 1.5px solid var(--border-strong);
       border-radius: 6px;
-      padding: 7px 8px;
+      padding: 8px 9px;
       max-height: 150px;
       overflow-y: auto;
       white-space: pre-wrap;
       word-break: break-all;
       user-select: text;
-      color: #cbd5e1;
+      color: var(--output-fg);
     }
 
     .reg-grid {
       display: grid;
       grid-template-columns: repeat(2, 1fr);
-      gap: 4px;
+      gap: 5px;
       margin-top: 6px;
     }
     .reg-cell {
       display: flex;
       justify-content: space-between;
       background: var(--bg-elevated);
-      border: 1px solid var(--border-color);
-      padding: 3px 6px;
+      border: 1px solid var(--border-subtle);
+      padding: 4px 7px;
       border-radius: 5px;
       font-family: var(--font-mono);
-      font-size: 11px;
+      font-size: 11.5px;
+      font-weight: 600;
     }
-    .reg-name { color: var(--violet); font-weight: 600; }
+    .reg-name { color: var(--var-ptr-color); font-weight: 700; }
     .reg-val { color: var(--fg-main); }
 
     .empty-hint {
-      font-size: 11.5px;
+      font-size: 12px;
+      font-weight: 500;
       color: var(--fg-muted);
       text-align: center;
       padding: 8px 4px;
@@ -554,22 +676,45 @@ function getSidebarHtml(options = {}) {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      font-size: 11px;
-      color: var(--fg-muted);
-      margin-bottom: 4px;
-      font-weight: 500;
+      font-size: 11.5px;
+      color: var(--fg-main);
+      margin-bottom: 5px;
+      font-weight: 700;
     }
 
+    /* ── Distinct Compile Error (CE) vs Warning Banners ── */
+    .diag-group-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 11.5px;
+      font-weight: 700;
+      margin-bottom: 4px;
+      padding: 2px 2px;
+    }
     .diag-item {
       font-family: var(--font-mono);
-      font-size: 11px;
-      padding: 5px 7px;
+      font-size: 11.5px;
+      font-weight: 600;
+      padding: 6px 8px;
       border-radius: 6px;
-      background: rgba(244, 63, 94, 0.12);
-      border: 1px solid rgba(244, 63, 94, 0.35);
-      color: #fda4af;
-      margin-bottom: 5px;
+      margin-bottom: 6px;
       cursor: pointer;
+    }
+    .diag-item.diag-error {
+      background: var(--error-bg);
+      border: 1.5px solid var(--error-border);
+      color: var(--error-fg);
+    }
+    .diag-item.diag-warning {
+      background: var(--warn-bg);
+      border: 1.5px solid var(--warn-border);
+      color: var(--warn-fg);
+    }
+    .diag-item.diag-info {
+      background: var(--bg-elevated);
+      border: 1.5px solid var(--border-strong);
+      color: var(--fg-main);
     }
   </style>
 </head>
@@ -608,19 +753,19 @@ function getSidebarHtml(options = {}) {
       <span>继续</span>
     </button>
     <button id="btnStepOver" class="ctrl-btn" disabled title="单步跳过 Step Over (F10)">
-      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 10a5 5 0 0 1 10 0"/><polyline points="11 7 13.5 10 10.5 11"/><circle cx="8" cy="12" r="1.5" fill="currentColor"/></svg>
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 10a5 5 0 0 1 10 0"/><polyline points="11 7 13.5 10 10.5 11"/><circle cx="8" cy="12" r="1.5" fill="currentColor"/></svg>
       <span>跳过</span>
     </button>
     <button id="btnStepInto" class="ctrl-btn" disabled title="单步进入 Step Into (F11)">
-      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><line x1="8" y1="2" x2="8" y2="10"/><polyline points="5 7.5 8 10.5 11 7.5"/><circle cx="8" cy="13.5" r="1.5" fill="currentColor"/></svg>
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><line x1="8" y1="2" x2="8" y2="10"/><polyline points="5 7.5 8 10.5 11 7.5"/><circle cx="8" cy="13.5" r="1.5" fill="currentColor"/></svg>
       <span>进入</span>
     </button>
     <button id="btnStepOut" class="ctrl-btn" disabled title="单步跳出 Step Out (Shift+F11)">
-      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><line x1="8" y1="10" x2="8" y2="2"/><polyline points="5 5 8 2 11 5"/><circle cx="8" cy="13.5" r="1.5" fill="currentColor"/></svg>
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><line x1="8" y1="10" x2="8" y2="2"/><polyline points="5 5 8 2 11 5"/><circle cx="8" cy="13.5" r="1.5" fill="currentColor"/></svg>
       <span>跳出</span>
     </button>
     <button id="btnRestart" class="ctrl-btn" disabled title="重新编译并调试 Restart">
-      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M13 8a5 5 0 1 1-1.4-3.5"/><polyline points="13 2 13 5.5 9.5 5.5"/></svg>
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M13 8a5 5 0 1 1-1.4-3.5"/><polyline points="13 2 13 5.5 9.5 5.5"/></svg>
       <span>重启</span>
     </button>
     <button id="btnStop" class="ctrl-btn danger" disabled title="停止调试 Stop (Shift+F5)">
@@ -657,7 +802,7 @@ function getSidebarHtml(options = {}) {
     <div class="section-body">
       <div class="input-row">
         <input id="watchInput" class="text-input" type="text" placeholder="添加表达式，如 dp[i]、arr@8、v.size()..." />
-        <button id="btnAddWatch" class="btn" style="padding: 4px 9px;">＋</button>
+        <button id="btnAddWatch" class="btn" style="padding: 4px 10px;">＋</button>
       </div>
       <div id="watchesContainer" class="var-list">
         <div class="empty-hint">暂无监视表达式</div>
@@ -733,7 +878,7 @@ function getSidebarHtml(options = {}) {
     <div class="section-body">
       <div class="input-row">
         <input id="gdbCmdInput" class="text-input" type="text" placeholder="输入 GDB 命令，如 p x、x/8xw &arr、bt..." />
-        <button id="btnSendGdb" class="btn" style="padding: 4px 9px;">发送</button>
+        <button id="btnSendGdb" class="btn" style="padding: 4px 10px;">发送</button>
       </div>
       <div id="gdbConsoleBox" class="output-box" style="max-height: 120px;">[Dream GDB] 准备就绪。</div>
       <div class="sub-label" style="margin-top: 8px;">
@@ -904,6 +1049,70 @@ function getSidebarHtml(options = {}) {
             arrayHtml +
           '</div>'
         );
+      }
+
+      function renderDiagnostics(diags, compileSuccess) {
+        if (!Array.isArray(diags) || diags.length === 0) {
+          el.compileDiagnostics.innerHTML = '';
+          return;
+        }
+
+        const errors = diags.filter((d) => d.severity === 'error');
+        const warnings = diags.filter((d) => d.severity === 'warning');
+        const infos = diags.filter((d) => d.severity !== 'error' && d.severity !== 'warning');
+
+        let html = '';
+
+        if (errors.length > 0) {
+          html += '<div class="diag-group-header" style="color: var(--error-border);">' +
+            '<span>✖ 编译错误 (CE · ' + errors.length + ')</span>' +
+            '<button class="icon-action" id="btnDismissDiags" title="关闭提示">✕</button>' +
+          '</div>';
+          html += errors.map((d) =>
+            '<div class="diag-item diag-error" data-file="' + escapeHtml(d.file) + '" data-line="' + d.line + '">' +
+              '✖ [错误] 第 ' + d.line + ' 行: ' + escapeHtml(d.message) +
+            '</div>'
+          ).join('');
+        }
+
+        if (warnings.length > 0) {
+          html += '<div class="diag-group-header" style="color: var(--warn-border);">' +
+            '<span>⚠ 编译警告 (' + warnings.length + ' 条' + (compileSuccess !== false ? ' · 不影响调试' : '') + ')</span>' +
+            (errors.length === 0 ? '<button class="icon-action" id="btnDismissDiags" title="隐藏警告">✕</button>' : '') +
+          '</div>';
+          html += warnings.map((d) =>
+            '<div class="diag-item diag-warning" data-file="' + escapeHtml(d.file) + '" data-line="' + d.line + '">' +
+              '⚠ [警告] 第 ' + d.line + ' 行: ' + escapeHtml(d.message) +
+            '</div>'
+          ).join('');
+        }
+
+        if (infos.length > 0 && errors.length > 0) {
+          html += infos.map((d) =>
+            '<div class="diag-item diag-info" data-file="' + escapeHtml(d.file) + '" data-line="' + d.line + '">' +
+              'ℹ [提示] 第 ' + d.line + ' 行: ' + escapeHtml(d.message) +
+            '</div>'
+          ).join('');
+        }
+
+        el.compileDiagnostics.innerHTML = html;
+
+        const dismissBtn = document.getElementById('btnDismissDiags');
+        if (dismissBtn) {
+          dismissBtn.addEventListener('click', () => {
+            el.compileDiagnostics.innerHTML = '';
+          });
+        }
+
+        el.compileDiagnostics.querySelectorAll('.diag-item').forEach((item) => {
+          item.addEventListener('click', () => {
+            vscode.postMessage({
+              type: 'jumpToLine',
+              file: item.getAttribute('data-file'),
+              line: Number(item.getAttribute('data-line'))
+            });
+          });
+        });
       }
 
       function renderSnapshot(snap) {
@@ -1102,25 +1311,7 @@ function getSidebarHtml(options = {}) {
           el.gdbConsoleBox.textContent += '\\n' + msg.text;
           el.gdbConsoleBox.scrollTop = el.gdbConsoleBox.scrollHeight;
         } else if (msg.type === 'compileDiagnostics') {
-          const diags = Array.isArray(msg.diagnostics) ? msg.diagnostics : [];
-          if (diags.length === 0) {
-            el.compileDiagnostics.innerHTML = '';
-          } else {
-            el.compileDiagnostics.innerHTML = diags.map((d) =>
-              '<div class="diag-item" data-file="' + escapeHtml(d.file) + '" data-line="' + d.line + '">' +
-                '✖ 第 ' + d.line + ' 行: ' + escapeHtml(d.message) +
-              '</div>'
-            ).join('');
-            el.compileDiagnostics.querySelectorAll('.diag-item').forEach((item) => {
-              item.addEventListener('click', () => {
-                vscode.postMessage({
-                  type: 'jumpToLine',
-                  file: item.getAttribute('data-file'),
-                  line: Number(item.getAttribute('data-line'))
-                });
-              });
-            });
-          }
+          renderDiagnostics(msg.diagnostics, msg.success);
         }
       });
 
