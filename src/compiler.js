@@ -1,6 +1,7 @@
 /**
  * Dream C++ Debugger — Smart C/C++ Compiler & Runner
- * Compiles C/C++ source files with debug symbols (-g -O0) and parses GCC/Clang diagnostics.
+ * Compiles C/C++ source files with debug symbols (-g -O0), parses GCC/Clang diagnostics,
+ * and supports preset text, file-based, and live streaming stdin execution.
  */
 'use strict';
 
@@ -132,7 +133,15 @@ function compileSourceFile(sourceFile, options = {}) {
           column: 1,
           severity: 'error',
           message: `无法启动编译器 "${compiler}": ${err.message}`
-        }]
+        }],
+        errors: [{
+          file: absSource,
+          line: 1,
+          column: 1,
+          severity: 'error',
+          message: `无法启动编译器 "${compiler}": ${err.message}`
+        }],
+        warnings: []
       });
     }
 
@@ -140,6 +149,13 @@ function compileSourceFile(sourceFile, options = {}) {
     proc.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
 
     proc.on('error', (err) => {
+      const errItem = {
+        file: absSource,
+        line: 1,
+        column: 1,
+        severity: 'error',
+        message: `未找到编译器 "${compiler}" (${err.message})，请检查系统 PATH 或设置 dreamCppDebug.compilerPath`
+      };
       resolve({
         success: false,
         executable: null,
@@ -147,13 +163,9 @@ function compileSourceFile(sourceFile, options = {}) {
         stdout,
         stderr: `${stderr}\n${err.message}`.trim(),
         durationMs: Date.now() - startTime,
-        diagnostics: [{
-          file: absSource,
-          line: 1,
-          column: 1,
-          severity: 'error',
-          message: `未找到编译器 "${compiler}" (${err.message})，请检查系统 PATH 或设置 dreamCppDebug.compilerPath`
-        }]
+        diagnostics: [errItem],
+        errors: [errItem],
+        warnings: []
       });
     });
 
@@ -179,32 +191,65 @@ function compileSourceFile(sourceFile, options = {}) {
 }
 
 /**
- * Run a compiled binary directly with optional stdin and capture output + timing.
+ * Run a compiled binary with support for:
+ * - Preset text stdin (`options.stdin`)
+ * - File stdin (`options.stdinFile`)
+ * - Live streaming stdin (`options.streamMode: true`, exposing `onProcess(proc)` so caller can write chunks & close EOF)
  */
 function runExecutable(executablePath, options = {}) {
   return new Promise((resolve) => {
     const startTime = Date.now();
     const args = Array.isArray(options.args) ? options.args : [];
     const cwd = options.cwd || path.dirname(executablePath);
-    const timeoutMs = options.timeoutMs || 15000;
+    const timeoutMs = options.timeoutMs || (options.streamMode ? 120000 : 15000);
 
     let stdout = '';
     let stderr = '';
     let killedByTimeout = false;
 
     const proc = spawn(executablePath, args, { cwd, env: process.env });
+    if (typeof options.onProcess === 'function') {
+      options.onProcess(proc);
+    }
+
     const timer = setTimeout(() => {
       killedByTimeout = true;
-      proc.kill('SIGKILL');
+      try { proc.kill('SIGKILL'); } catch (_) {}
     }, timeoutMs);
 
-    proc.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
-    proc.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+    proc.stdout.on('data', (chunk) => {
+      const text = chunk.toString();
+      stdout += text;
+      if (typeof options.onOutput === 'function') {
+        options.onOutput(text, stdout);
+      }
+    });
 
-    if (typeof options.stdin === 'string' && options.stdin.length > 0) {
-      proc.stdin.write(options.stdin.endsWith('\n') ? options.stdin : `${options.stdin}\n`);
+    proc.stderr.on('data', (chunk) => {
+      const text = chunk.toString();
+      stderr += text;
+      if (typeof options.onOutput === 'function') {
+        options.onOutput(text, stdout + (stderr ? `\n[stderr]\n${stderr}` : ''));
+      }
+    });
+
+    if (options.stdinFile && fs.existsSync(options.stdinFile)) {
+      const fileStream = fs.createReadStream(options.stdinFile);
+      fileStream.on('error', () => {
+        try { proc.stdin.end(); } catch (_) {}
+      });
+      fileStream.pipe(proc.stdin);
+    } else if (options.streamMode) {
+      if (typeof options.stdin === 'string' && options.stdin.length > 0) {
+        proc.stdin.write(options.stdin.endsWith('\n') ? options.stdin : `${options.stdin}\n`);
+      }
+      // Keep proc.stdin open in streamMode so user can send additional chunks live!
+    } else {
+      if (typeof options.stdin === 'string' && options.stdin.length > 0) {
+        proc.stdin.write(options.stdin.endsWith('\n') ? options.stdin : `${options.stdin}\n`);
+      }
+      proc.stdin.end();
     }
-    proc.stdin.end();
 
     proc.on('error', (err) => {
       clearTimeout(timer);

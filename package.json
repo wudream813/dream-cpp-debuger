@@ -2,7 +2,7 @@
   "name": "dream-cpp-debuger",
   "displayName": "Dream C++ Debugger (GDB)",
   "description": "现代简洁的 C/C++ GDB 调试器扩展 —— 零配置一键编译调试、现代化侧边栏面板、STL/数组可视化、条件断点、标准输入(stdin)注入与行内变量实时预览。",
-  "version": "1.1.2",
+  "version": "1.1.3",
   "publisher": "wudream",
   "author": {
     "name": "wudream813"
@@ -373,11 +373,6 @@
           "type": "boolean",
           "default": true,
           "description": "调试暂停时将鼠标悬停在代码变量上自动通过 GDB 计算值与类型"
-        },
-        "dreamCppDebug.enableCodeLens": {
-          "type": "boolean",
-          "default": true,
-          "description": "在 main 函数上方显示「▶ GDB 调试」与「⚡ 编译运行」快捷 CodeLens"
         },
         "dreamCppDebug.maxArrayPreview": {
           "type": "number",

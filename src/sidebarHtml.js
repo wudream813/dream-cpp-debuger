@@ -2,9 +2,11 @@
  * Dream C++ Debugger — Streamlined Left Sidebar Webview UI
  * Left sidebar focuses exclusively on:
  *   1. One-click Compile & GDB Debug / Quick Compile & Run
- *   2. Standard Input (stdin) preset & live Program Output (stdout / stderr)
- * All variables, watches, call stack, breakpoints, and GDB console live in the
- * right-side Debug Dashboard Panel (opened automatically in ViewColumn.Beside).
+ *   2. Standard Input (stdin) supporting 3 modes:
+ *      - 📝 文本预设 (Preset Text)
+ *      - 🌊 流式输入 (Live Streaming Stdin — send lines interactively during execution/debug)
+ *      - 📂 从文件输入 (File Stdin — pick or enter any .in / .txt file)
+ *   3. Live Program Output (stdout / stderr)
  */
 'use strict';
 
@@ -277,28 +279,115 @@ function getSidebarHtml(options = {}) {
       border-color: var(--border-focus);
     }
 
-    .textarea-input {
+    /* ── Mode Switcher Tabs for Stdin ── */
+    .mode-tabs {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 4px;
+      background: var(--bg-base);
+      padding: 4px;
+      border-radius: 8px;
+      border: 1px solid var(--border-subtle);
+      margin-bottom: 10px;
+    }
+    .mode-tab {
+      border: 1px solid transparent;
+      background: transparent;
+      color: var(--fg-muted);
+      font-family: inherit;
+      font-size: 11.5px;
+      font-weight: 700;
+      padding: 5px 4px;
+      border-radius: 6px;
+      cursor: pointer;
+      text-align: center;
+      transition: all 0.14s ease;
+    }
+    .mode-tab:hover {
+      color: var(--fg-main);
+      background: var(--bg-hover);
+    }
+    .mode-tab.active {
+      background: var(--accent);
+      color: #ffffff;
+      border-color: #818cf8;
+    }
+
+    .mode-pane {
+      display: none;
+    }
+    .mode-pane.active {
+      display: block;
+    }
+
+    .text-input, .textarea-input {
       width: 100%;
-      min-height: 145px;
       background: var(--bg-input);
       border: 1.5px solid var(--border-strong);
       color: var(--fg-main);
       font-family: var(--font-mono);
       font-size: 12.5px;
       line-height: 1.45;
-      padding: 8px 10px;
+      padding: 7px 9px;
       border-radius: 7px;
-      resize: vertical;
       outline: none;
       user-select: text;
     }
-    .textarea-input::placeholder {
+    .textarea-input {
+      min-height: 135px;
+      resize: vertical;
+    }
+    .text-input::placeholder, .textarea-input::placeholder {
       color: var(--fg-muted);
       opacity: 0.85;
     }
-    .textarea-input:focus {
+    .text-input:focus, .textarea-input:focus {
       border-color: var(--border-focus);
       box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.25);
+    }
+
+    .stream-bar {
+      display: flex;
+      gap: 5px;
+      margin-bottom: 8px;
+    }
+
+    .stream-log {
+      font-family: var(--font-mono);
+      font-size: 11.5px;
+      background: var(--output-bg);
+      border: 1.5px solid var(--border-subtle);
+      color: var(--output-fg);
+      border-radius: 6px;
+      padding: 6px 8px;
+      min-height: 64px;
+      max-height: 120px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+      margin-top: 6px;
+    }
+
+    .file-info-box {
+      font-family: var(--font-mono);
+      font-size: 11.5px;
+      background: var(--bg-input);
+      border: 1.5px solid var(--border-subtle);
+      border-radius: 7px;
+      padding: 7px 9px;
+      margin-top: 8px;
+      color: var(--fg-main);
+      word-break: break-all;
+    }
+
+    .hint-label {
+      font-size: 11.5px;
+      font-weight: 600;
+      color: var(--fg-muted);
+      margin-bottom: 5px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
     }
 
     .output-box {
@@ -347,11 +436,6 @@ function getSidebarHtml(options = {}) {
       border: 1.5px solid var(--warn-border);
       color: var(--warn-fg);
     }
-    .diag-item.diag-info {
-      background: var(--bg-input);
-      border: 1.5px solid var(--border-strong);
-      color: var(--fg-main);
-    }
   </style>
 </head>
 <body>
@@ -383,14 +467,50 @@ function getSidebarHtml(options = {}) {
     </div>
   </div>
 
-  <!-- 2. Standard Input (stdin) Card -->
+  <!-- 2. Standard Input (stdin) Card with 3 Modes: Text / Stream / File -->
   <div class="card">
     <div class="card-header">
       <span>📥 标准输入 (stdin)</span>
-      <button id="btnClearStdin" class="small-action" title="清空输入数据">清空</button>
+      <button id="btnClearStdin" class="small-action" title="清空当前输入">清空</button>
     </div>
     <div class="card-body">
-      <textarea id="stdinTextarea" class="textarea-input" placeholder="在此粘贴测试输入样例（支持多行），点击上方「编译并调试」或「编译运行」时将自动注入 cin / scanf..."></textarea>
+      <div class="mode-tabs">
+        <button class="mode-tab active" data-mode="text" title="运行前一次性预设全部输入文本">📝 文本预设</button>
+        <button class="mode-tab" data-mode="stream" title="边运行/调试边实时发送每一行流式输入">🌊 流式输入</button>
+        <button class="mode-tab" data-mode="file" title="直接从本地 .in / .txt 文件重定向输入">📂 文件输入</button>
+      </div>
+
+      <!-- Mode 1: Text Preset -->
+      <div id="pane-text" class="mode-pane active">
+        <textarea id="stdinTextarea" class="textarea-input" placeholder="在此粘贴测试输入样例（支持多行），启动调试或运行时自动注入 cin / scanf..."></textarea>
+      </div>
+
+      <!-- Mode 2: Live Streaming Input -->
+      <div id="pane-stream" class="mode-pane">
+        <div class="hint-label">
+          <span>实时发送流式数据 (程序运行或暂停时均可追加)</span>
+        </div>
+        <div class="stream-bar">
+          <input id="streamLineInput" class="text-input" type="text" placeholder="输入一行数据按 Enter 发送..." />
+          <button id="btnSendStream" class="btn btn-primary" style="padding: 6px 10px; white-space: nowrap;">发送 ↵</button>
+          <button id="btnSendEof" class="btn" style="padding: 6px 8px; white-space: nowrap;" title="结束输入流 (发送 EOF)">EOF</button>
+        </div>
+        <div class="hint-label" style="margin-top: 6px;">
+          <span>已发送流式记录</span>
+        </div>
+        <div id="streamHistoryBox" class="stream-log">尚未发送流式输入...</div>
+      </div>
+
+      <!-- Mode 3: File Input -->
+      <div id="pane-file" class="mode-pane">
+        <div class="btn-stack">
+          <button id="btnPickStdinFile" class="btn" style="width: 100%;">
+            <span>📂 选择本地输入文件 (.in / .txt)...</span>
+          </button>
+          <input id="stdinFilePathInput" class="text-input" type="text" placeholder="或直接输入文件路径（如 input.in）..." />
+        </div>
+        <div id="filePreviewBox" class="file-info-box">尚未选择输入文件</div>
+      </div>
     </div>
   </div>
 
@@ -414,6 +534,9 @@ function getSidebarHtml(options = {}) {
         ? acquireVsCodeApi()
         : { postMessage: () => {} };
 
+      let currentStdinMode = 'text';
+      let streamHistoryText = '';
+
       const el = {
         statusDot: document.getElementById('statusDot'),
         targetFileName: document.getElementById('targetFileName'),
@@ -424,6 +547,13 @@ function getSidebarHtml(options = {}) {
         btnOpenDashboard: document.getElementById('btnOpenDashboard'),
         stdinTextarea: document.getElementById('stdinTextarea'),
         btnClearStdin: document.getElementById('btnClearStdin'),
+        streamLineInput: document.getElementById('streamLineInput'),
+        btnSendStream: document.getElementById('btnSendStream'),
+        btnSendEof: document.getElementById('btnSendEof'),
+        streamHistoryBox: document.getElementById('streamHistoryBox'),
+        btnPickStdinFile: document.getElementById('btnPickStdinFile'),
+        stdinFilePathInput: document.getElementById('stdinFilePathInput'),
+        filePreviewBox: document.getElementById('filePreviewBox'),
         btnCopyStdout: document.getElementById('btnCopyStdout'),
         btnClearStdout: document.getElementById('btnClearStdout'),
         programOutputBox: document.getElementById('programOutputBox')
@@ -437,12 +567,48 @@ function getSidebarHtml(options = {}) {
           .replace(/"/g, '&quot;');
       }
 
+      function setStdinMode(mode) {
+        currentStdinMode = mode || 'text';
+        document.querySelectorAll('.mode-tab').forEach((tab) => {
+          tab.classList.toggle('active', tab.getAttribute('data-mode') === currentStdinMode);
+        });
+        ['text', 'stream', 'file'].forEach((m) => {
+          const pane = document.getElementById('pane-' + m);
+          if (pane) pane.classList.toggle('active', m === currentStdinMode);
+        });
+        vscode.postMessage({ type: 'updateStdinMode', mode: currentStdinMode });
+      }
+
+      document.querySelectorAll('.mode-tab').forEach((tab) => {
+        tab.addEventListener('click', () => {
+          setStdinMode(tab.getAttribute('data-mode'));
+        });
+      });
+
       el.btnStartDebug.addEventListener('click', () => {
-        vscode.postMessage({ type: 'startDebug', stdin: el.stdinTextarea.value });
+        if (currentStdinMode === 'stream') {
+          streamHistoryText = '';
+          el.streamHistoryBox.textContent = '流式通道已就绪，请在上方输入框发送数据...';
+        }
+        vscode.postMessage({
+          type: 'startDebug',
+          stdinMode: currentStdinMode,
+          stdin: el.stdinTextarea.value,
+          stdinFile: el.stdinFilePathInput.value.trim()
+        });
       });
 
       el.btnQuickRun.addEventListener('click', () => {
-        vscode.postMessage({ type: 'compileAndRun', stdin: el.stdinTextarea.value });
+        if (currentStdinMode === 'stream') {
+          streamHistoryText = '';
+          el.streamHistoryBox.textContent = '流式通道已就绪，请在上方输入框发送数据...';
+        }
+        vscode.postMessage({
+          type: 'compileAndRun',
+          stdinMode: currentStdinMode,
+          stdin: el.stdinTextarea.value,
+          stdinFile: el.stdinFilePathInput.value.trim()
+        });
       });
 
       el.btnOpenDashboard.addEventListener('click', () => {
@@ -453,9 +619,52 @@ function getSidebarHtml(options = {}) {
         vscode.postMessage({ type: 'updateStdin', stdin: el.stdinTextarea.value });
       });
 
+      // Live streaming input controls
+      function sendStreamChunk() {
+        const text = el.streamLineInput.value;
+        if (!text) return;
+        vscode.postMessage({ type: 'sendStreamStdin', text });
+        streamHistoryText += (streamHistoryText ? '\\n' : '') + '→ ' + text;
+        el.streamHistoryBox.textContent = streamHistoryText;
+        el.streamHistoryBox.scrollTop = el.streamHistoryBox.scrollHeight;
+        el.streamLineInput.value = '';
+      }
+
+      el.btnSendStream.addEventListener('click', sendStreamChunk);
+      el.streamLineInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') sendStreamChunk();
+      });
+
+      el.btnSendEof.addEventListener('click', () => {
+        vscode.postMessage({ type: 'closeStreamStdin' });
+        streamHistoryText += (streamHistoryText ? '\\n' : '') + '■ [已发送 EOF]';
+        el.streamHistoryBox.textContent = streamHistoryText;
+      });
+
+      // File input controls
+      el.btnPickStdinFile.addEventListener('click', () => {
+        vscode.postMessage({ type: 'pickStdinFile' });
+      });
+
+      el.stdinFilePathInput.addEventListener('change', () => {
+        vscode.postMessage({
+          type: 'setStdinFilePath',
+          filePath: el.stdinFilePathInput.value.trim()
+        });
+      });
+
       el.btnClearStdin.addEventListener('click', () => {
-        el.stdinTextarea.value = '';
-        vscode.postMessage({ type: 'updateStdin', stdin: '' });
+        if (currentStdinMode === 'text') {
+          el.stdinTextarea.value = '';
+          vscode.postMessage({ type: 'updateStdin', stdin: '' });
+        } else if (currentStdinMode === 'stream') {
+          streamHistoryText = '';
+          el.streamHistoryBox.textContent = '尚未发送流式输入...';
+        } else if (currentStdinMode === 'file') {
+          el.stdinFilePathInput.value = '';
+          el.filePreviewBox.textContent = '尚未选择输入文件';
+          vscode.postMessage({ type: 'setStdinFilePath', filePath: '' });
+        }
       });
 
       el.btnClearStdout.addEventListener('click', () => {
@@ -548,6 +757,14 @@ function getSidebarHtml(options = {}) {
 
         if (typeof snap.stdinText === 'string' && document.activeElement !== el.stdinTextarea) {
           el.stdinTextarea.value = snap.stdinText;
+        }
+
+        if (typeof snap.stdinFile === 'string' && document.activeElement !== el.stdinFilePathInput) {
+          el.stdinFilePathInput.value = snap.stdinFile;
+        }
+
+        if (typeof snap.stdinFilePreview === 'string' && snap.stdinFilePreview) {
+          el.filePreviewBox.textContent = snap.stdinFilePreview;
         }
 
         if (typeof snap.programOutput === 'string' && snap.programOutput.length > 0) {

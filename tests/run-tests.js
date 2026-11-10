@@ -298,12 +298,131 @@ async function runAllTests() {
   console.log('\n=== 4. Dual-Pane UI Verification (Left Sidebar I/O + Right Dashboard) ===');
   const sidebarHtml = getSidebarHtml({ nonce: 'test-nonce' });
   assert.ok(sidebarHtml.includes('标准输入 (stdin)'));
+  assert.ok(sidebarHtml.includes('文本预设'));
+  assert.ok(sidebarHtml.includes('流式输入'));
+  assert.ok(sidebarHtml.includes('文件输入'));
   assert.ok(sidebarHtml.includes('程序输出 (stdout / stderr)'));
   assert.ok(sidebarHtml.includes('编译并开始 GDB 调试'));
   assert.ok(!sidebarHtml.includes('localsContainer'), 'Left sidebar should only hold compile/run and stdin/stdout');
   assert.ok(sidebarHtml.includes('body.vscode-light'));
   assert.ok(sidebarHtml.includes('diag-warning'));
-  ok('Left Sidebar (getSidebarHtml) holds only Compile/Run controls + Stdin/Stdout I/O');
+  ok('Left Sidebar (getSidebarHtml) holds Compile/Run controls + 3-mode Stdin (Text / Stream / File) & Stdout I/O');
+
+  // Verify CodeLens removed and Activity Bar icon is smooth circle
+  const extCode = fs.readFileSync(path.join(__dirname, '..', 'extension.js'), 'utf8');
+  assert.ok(!extCode.includes('registerCodeLensProvider'), 'CodeLens provider must not clutter functions in editor');
+  const activityIconSvg = fs.readFileSync(path.join(__dirname, '..', 'media', 'activity-icon.svg'), 'utf8');
+  assert.ok(activityIconSvg.includes('<circle'), 'Activity Bar icon must use a smooth circle');
+  ok('No CodeLens prompts in C/C++ functions & smooth circular Activity Bar SVG verified');
+
+  // Test file-based stdin and streaming stdin in compiler + GDBSession
+  {
+    const tmpStreamDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dream-stdin-test-'));
+    const streamCpp = path.join(tmpStreamDir, 'stream_test.cpp');
+    const inFile = path.join(tmpStreamDir, 'sample.in');
+    fs.writeFileSync(inFile, '100 250\n', 'utf8');
+    fs.writeFileSync(
+      streamCpp,
+      `#include <iostream>
+int main() {
+    int a = 0, b = 0;
+    std::cin >> a >> b;
+    int sum = a + b;
+    std::cout << "SUM=" << sum << std::endl;
+    return 0;
+}
+`,
+      'utf8'
+    );
+    const compStream = await compileSourceFile(streamCpp);
+    assert.strictEqual(compStream.success, true);
+
+    // 1. File-based stdin with runExecutable
+    const fileRunRes = await runExecutable(compStream.executable, {
+      stdinFile: inFile
+    });
+    assert.ok(fileRunRes.stdout.includes('SUM=350'), `Expected SUM=350 from file stdin, got: ${fileRunRes.stdout}`);
+
+    // 2. Streaming stdin with runExecutable
+    const streamRunPromise = runExecutable(compStream.executable, {
+      streamMode: true,
+      onProcess: (proc) => {
+        setTimeout(() => {
+          proc.stdin.write('40\n');
+          setTimeout(() => {
+            proc.stdin.write('60\n');
+            proc.stdin.end();
+          }, 50);
+        }, 50);
+      }
+    });
+    const streamRunRes = await streamRunPromise;
+    assert.ok(streamRunRes.stdout.includes('SUM=100'), `Expected SUM=100 from streaming stdin, got: ${streamRunRes.stdout}`);
+    ok('File-based stdin and live streaming stdin in runExecutable verified');
+
+    // 3. Streaming stdin in GDBSession
+    {
+      const streamSession = new GDBSession({ gdbPath: 'gdb' });
+      const waitPause = () =>
+        new Promise((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error('GDB pause timeout')), 8000);
+          const onStat = (ev) => {
+            if (ev.state === 'paused') {
+              clearTimeout(timer);
+              streamSession.off('status', onStat);
+              resolve(ev);
+            }
+          };
+          streamSession.on('status', onStat);
+        });
+
+      const p1 = waitPause();
+      await streamSession.start({
+        executable: compStream.executable,
+        sourceFile: streamCpp,
+        cwd: tmpStreamDir,
+        stdinMode: 'stream',
+        stopAtMain: true
+      });
+      await p1;
+
+      await streamSession.setBreakpoint(streamCpp, 6);
+      // Send streaming data into GDB inferior while paused before cin!
+      streamSession.sendStdin('77');
+      streamSession.sendStdin('88');
+
+      const p2 = waitPause();
+      await streamSession.continue();
+      await p2;
+
+      const sumEval = await streamSession.evaluateExpression('sum');
+      assert.strictEqual(sumEval.displayValue, '165');
+      await streamSession.stop();
+
+      // Also verify file-based stdin in GDBSession
+      const pFile1 = waitPause();
+      await streamSession.start({
+        executable: compStream.executable,
+        sourceFile: streamCpp,
+        cwd: tmpStreamDir,
+        stdinMode: 'file',
+        stdinFile: inFile,
+        stopAtMain: true
+      });
+      await pFile1;
+      await streamSession.setBreakpoint(streamCpp, 6);
+      const pFile2 = waitPause();
+      await streamSession.continue();
+      await pFile2;
+      const fileSumEval = await streamSession.evaluateExpression('sum');
+      assert.strictEqual(fileSumEval.displayValue, '350');
+      await streamSession.stop();
+
+      ok('Real-time streaming stdin (sendStdin) and file stdin (stdinFile) in GDBSession verified');
+    }
+
+    fs.rmSync(tmpStreamDir, { recursive: true, force: true });
+  }
 
   const dashHtml = getDashboardHtml({ nonce: 'test-nonce' });
   assert.ok(dashHtml.includes('局部变量 & STL / 数组可视化'));

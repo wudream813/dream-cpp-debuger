@@ -6,7 +6,7 @@
 'use strict';
 
 const { EventEmitter } = require('events');
-const { spawn } = require('child_process');
+const { spawn, execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -59,9 +59,10 @@ class GDBSession extends EventEmitter {
     this.breakpoints = new Map(); // key: `${normPath}:${line}` -> { id, gdbNumber, file, line, enabled, condition, hitCount }
     this.registers = [];
 
-    // Temp files for inferior stdin/stdout
+    // Temp files & FIFO for inferior stdin/stdout
     this.tempDir = null;
     this.stdinFile = null;
+    this.stdinFifoFd = null;
     this.stdoutFile = null;
     this.stdoutReadOffset = 0;
     this.stdoutTimer = null;
@@ -98,13 +99,33 @@ class GDBSession extends EventEmitter {
 
     // Prepare isolated temp directory for this session's stdin & stdout redirection
     const sessionTempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dream-gdb-'));
-    const sessionStdinFile = path.join(sessionTempDir, 'stdin.txt');
     const sessionStdoutFile = path.join(sessionTempDir, 'stdout.txt');
-    fs.writeFileSync(sessionStdinFile, typeof config.stdin === 'string' ? config.stdin : '', 'utf8');
     fs.writeFileSync(sessionStdoutFile, '', 'utf8');
 
+    let sessionStdinTarget = path.join(sessionTempDir, 'stdin.txt');
+    const stdinMode = config.stdinMode || 'text';
+
+    if (stdinMode === 'file' && config.stdinFile && fs.existsSync(config.stdinFile)) {
+      sessionStdinTarget = path.resolve(config.stdinFile);
+    } else if (stdinMode === 'stream' && process.platform !== 'win32') {
+      const fifoPath = path.join(sessionTempDir, 'stdin.fifo');
+      try {
+        execFileSync('mkfifo', [fifoPath]);
+        this.stdinFifoFd = fs.openSync(fifoPath, fs.constants.O_RDWR | fs.constants.O_NONBLOCK);
+        if (typeof config.stdin === 'string' && config.stdin.length > 0) {
+          const initData = config.stdin.endsWith('\n') ? config.stdin : `${config.stdin}\n`;
+          fs.writeSync(this.stdinFifoFd, Buffer.from(initData, 'utf8'));
+        }
+        sessionStdinTarget = fifoPath;
+      } catch (_) {
+        fs.writeFileSync(sessionStdinTarget, typeof config.stdin === 'string' ? config.stdin : '', 'utf8');
+      }
+    } else {
+      fs.writeFileSync(sessionStdinTarget, typeof config.stdin === 'string' ? config.stdin : '', 'utf8');
+    }
+
     this.tempDir = sessionTempDir;
-    this.stdinFile = sessionStdinFile;
+    this.stdinFile = sessionStdinTarget;
     this.stdoutFile = sessionStdoutFile;
 
     const gdbArgs = ['--interpreter=mi2', '--quiet', this.executable];
@@ -209,7 +230,7 @@ class GDBSession extends EventEmitter {
 
     // Configure arguments + stdin/stdout redirection
     const userArgs = Array.isArray(config.args) ? config.args.join(' ') : '';
-    const escIn = sessionStdinFile.replace(/\\/g, '/');
+    const escIn = sessionStdinTarget.replace(/\\/g, '/');
     const escOut = sessionStdoutFile.replace(/\\/g, '/');
     const redirectArgs = `${userArgs} < "${escIn}" > "${escOut}" 2>&1`.trim();
     await this.sendCommand(`-exec-arguments ${redirectArgs}`).catch(() => {});
@@ -313,12 +334,49 @@ class GDBSession extends EventEmitter {
   }
 
   /**
+   * Stream a line or chunk of standard input (stdin) into the running/paused inferior process.
+   */
+  sendStdin(text) {
+    if (typeof text !== 'string' || !text.length) return false;
+    const payload = text.endsWith('\n') ? text : `${text}\n`;
+    try {
+      if (this.stdinFifoFd !== null) {
+        fs.writeSync(this.stdinFifoFd, Buffer.from(payload, 'utf8'));
+      } else if (this.stdinFile && fs.existsSync(this.stdinFile)) {
+        fs.appendFileSync(this.stdinFile, payload, 'utf8');
+      } else {
+        return false;
+      }
+      setTimeout(() => this._pollProgramOutput(), 80);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /**
+   * Send EOF to the streaming stdin pipe.
+   */
+  closeStdin() {
+    if (this.stdinFifoFd !== null) {
+      try {
+        fs.closeSync(this.stdinFifoFd);
+      } catch (_) {}
+      this.stdinFifoFd = null;
+      setTimeout(() => this._pollProgramOutput(), 80);
+      return true;
+    }
+    return false;
+  }
+
+  /**
    * Completely stop the current GDB process and wait until the OS process has exited
    * so that subsequent compilations or restarts never collide with a lingering GDB instance.
    */
   async stop(options = {}) {
     this._stopOutputWatcher();
     this._pollProgramOutput();
+    this.closeStdin();
 
     const oldProc = this.proc;
     const oldTempDir = this.tempDir;

@@ -2,6 +2,18 @@
 
 All notable changes to the **Dream C++ Debugger (GDB)** extension will be documented in this file.
 
+## [1.1.3] - 2026-11-09
+
+### Changed & Added
+- **移除代码编辑器函数上方的 `GDB 调试` CodeLens 提示**：
+  - 移除 `registerCodeLensProvider`，保持 C/C++ 代码编辑区清爽干净，不再在函数上方插入 `GDB 调试` / `快速编译运行` 悬浮行（所有调试与运行操作均通过左侧边栏或编辑器右上角工具栏触发）。
+- **左侧活动栏 SVG 图标更新为圆润的圆形设计**：
+  - 将 `media/activity-icon.svg`、`media/icon.svg` 与 `media/icon.png` 替换为平滑的圆形外框徽章（`<circle>`）与极简调试符号，告别原本尖锐的多边形盾牌边角。
+- **标准输入 (`stdin`) 新增「🌊 流式输入」与「📂 文件输入」模式**：
+  - **📝 文本预设 (`text`)**：运行或调试前一次性粘贴多行测试数据。
+  - **🌊 流式输入 (`stream`)**：支持在程序运行或 GDB 断点暂停期间，通过交互式输入框实时逐行发送流式数据（基于底层命名管道 FIFO / 实时流追加）以及发送 `EOF` 信号，并实时展示已发送流式记录。
+  - **📂 文件输入 (`file`)**：支持一键选择本地 `.in` / `.txt` / `.dat` 输入文件或直接填入相对/绝对路径，自动显示文件大小与内容预览，并在编译运行和 GDB 调试中直接从文件重定向标准输入。
+
 ## [1.1.2] - 2026-11-09
 
 ### Fixed & Enhanced

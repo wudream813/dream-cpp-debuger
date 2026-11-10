@@ -1,6 +1,6 @@
 /**
  * Dream C++ Debugger (GDB) — Main VS Code Extension Entry
- * Left Sidebar: Compile / Run controls + Stdin & Stdout I/O
+ * Left Sidebar: Compile / Run controls + Stdin (Text / Stream / File) & Stdout I/O
  * Right Editor Pane (`ViewColumn.Beside`): Full GDB Debug Dashboard (Variables, STL/Arrays, Watch, Call Stack, Breakpoints, Console)
  * Author: wudream813
  */
@@ -62,7 +62,12 @@ class DreamDebugController {
       maxArrayPreview: this.config.get('maxArrayPreview', 16)
     });
 
+    this.stdinMode = 'text';
     this.stdinText = '';
+    this.stdinFile = '';
+    this.stdinFilePreview = '';
+    this.activeRunProcess = null;
+
     this.lastTargetFile = null;
     this.syncingBreakpoints = false;
     this.dashboardPanel = null;
@@ -111,7 +116,6 @@ class DreamDebugController {
       return this.dashboardPanel;
     }
 
-    // Ensure the active C/C++ editor stays in ViewColumn.One before splitting to Beside
     const activeEditor = vscode.window.activeTextEditor;
     const targetColumn =
       activeEditor && activeEditor.viewColumn === vscode.ViewColumn.One
@@ -223,24 +227,85 @@ class DreamDebugController {
     return null;
   }
 
+  resolveStdinFilePath(rawPath, sourceFile) {
+    if (!rawPath) return '';
+    if (path.isAbsolute(rawPath)) return rawPath;
+    if (sourceFile) {
+      const relToSource = path.resolve(path.dirname(sourceFile), rawPath);
+      if (fs.existsSync(relToSource)) return relToSource;
+    }
+    const folders = vscode.workspace.workspaceFolders;
+    if (folders && folders.length > 0) {
+      const relToWorkspace = path.resolve(folders[0].uri.fsPath, rawPath);
+      if (fs.existsSync(relToWorkspace)) return relToWorkspace;
+    }
+    return path.resolve(rawPath);
+  }
+
+  updateStdinFileInfo(rawPath) {
+    this.stdinFile = rawPath || '';
+    if (!this.stdinFile) {
+      this.stdinFilePreview = '尚未选择输入文件';
+      this.pushSnapshotToWebview();
+      return;
+    }
+    const resolved = this.resolveStdinFilePath(this.stdinFile, this.resolveActiveSourceFile());
+    if (!fs.existsSync(resolved)) {
+      this.stdinFilePreview = `⚠ 文件不存在: ${resolved}`;
+      this.pushSnapshotToWebview();
+      return;
+    }
+    try {
+      const stat = fs.statSync(resolved);
+      const sizeStr = stat.size > 1024 ? `${(stat.size / 1024).toFixed(1)} KB` : `${stat.size} B`;
+      const fd = fs.openSync(resolved, 'r');
+      const buf = Buffer.alloc(Math.min(stat.size, 512));
+      fs.readSync(fd, buf, 0, buf.length, 0);
+      fs.closeSync(fd);
+      const previewContent = buf.toString('utf8');
+      this.stdinFilePreview =
+        `📄 ${path.basename(resolved)} (${sizeStr})\n` +
+        `────────────────────────\n` +
+        `${previewContent}${stat.size > 512 ? '\n...(后略)' : ''}`;
+    } catch (err) {
+      this.stdinFilePreview = `⚠ 读取文件失败: ${err.message}`;
+    }
+    this.pushSnapshotToWebview();
+  }
+
   pushSnapshotToWebview() {
     const snap = this.session.getSnapshot();
     const activeFile = this.resolveActiveSourceFile();
     snap.activeFileName = activeFile ? path.basename(activeFile) : '';
+    snap.stdinMode = this.stdinMode;
     snap.stdinText = this.stdinText;
+    snap.stdinFile = this.stdinFile;
+    snap.stdinFilePreview = this.stdinFilePreview;
     this.postToAllViews({
       type: 'snapshot',
       snapshot: snap
     });
   }
 
-  async startDebugSession(customStdin) {
-    if (typeof customStdin === 'string') {
-      this.stdinText = customStdin;
+  async startDebugSession(options = {}) {
+    if (typeof options === 'string') {
+      this.stdinText = options;
+    } else if (options && typeof options === 'object') {
+      if (typeof options.stdin === 'string') this.stdinText = options.stdin;
+      if (typeof options.stdinMode === 'string') this.stdinMode = options.stdinMode;
+      if (typeof options.stdinFile === 'string') this.updateStdinFileInfo(options.stdinFile);
     }
+
     const sourceFile = this.resolveActiveSourceFile();
     if (!sourceFile) {
       vscode.window.showWarningMessage('请先打开一个 C/C++ 源文件 (.cpp / .c) 再启动 GDB 调试。');
+      return;
+    }
+
+    const resolvedStdinFile =
+      this.stdinMode === 'file' ? this.resolveStdinFilePath(this.stdinFile, sourceFile) : '';
+    if (this.stdinMode === 'file' && (!resolvedStdinFile || !fs.existsSync(resolvedStdinFile))) {
+      vscode.window.showWarningMessage('请先选择一个有效的本地输入文件 (.in / .txt)，或切换到文本预设/流式输入模式。');
       return;
     }
 
@@ -253,7 +318,7 @@ class DreamDebugController {
     this.sidebarProvider.reveal();
     this.config = vscode.workspace.getConfiguration('dreamCppDebug');
 
-    // Ensure any previous GDB process is completely terminated before compiling (prevents .exe file lock on Windows)
+    // Ensure any previous GDB process is completely terminated before compiling
     await this.session.stop();
 
     this.statusBarItem.text = '$(sync~spin) 正在编译 C++ 源码...';
@@ -287,7 +352,9 @@ class DreamDebugController {
         executable: compileResult.executable,
         sourceFile,
         cwd: path.dirname(sourceFile),
+        stdinMode: this.stdinMode,
         stdin: this.stdinText,
+        stdinFile: resolvedStdinFile,
         stopAtMain: this.config.get('stopAtMain', true)
       });
     } catch (err) {
@@ -295,13 +362,25 @@ class DreamDebugController {
     }
   }
 
-  async compileAndQuickRun(customStdin) {
-    if (typeof customStdin === 'string') {
-      this.stdinText = customStdin;
+  async compileAndQuickRun(options = {}) {
+    if (typeof options === 'string') {
+      this.stdinText = options;
+    } else if (options && typeof options === 'object') {
+      if (typeof options.stdin === 'string') this.stdinText = options.stdin;
+      if (typeof options.stdinMode === 'string') this.stdinMode = options.stdinMode;
+      if (typeof options.stdinFile === 'string') this.updateStdinFileInfo(options.stdinFile);
     }
+
     const sourceFile = this.resolveActiveSourceFile();
     if (!sourceFile) {
       vscode.window.showWarningMessage('请先打开一个 C/C++ 源文件 (.cpp / .c)。');
+      return;
+    }
+
+    const resolvedStdinFile =
+      this.stdinMode === 'file' ? this.resolveStdinFilePath(this.stdinFile, sourceFile) : '';
+    if (this.stdinMode === 'file' && (!resolvedStdinFile || !fs.existsSync(resolvedStdinFile))) {
+      vscode.window.showWarningMessage('请先选择一个有效的本地输入文件 (.in / .txt)，或切换到文本预设/流式输入模式。');
       return;
     }
 
@@ -314,6 +393,12 @@ class DreamDebugController {
     this.config = vscode.workspace.getConfiguration('dreamCppDebug');
 
     await this.session.stop();
+    if (this.activeRunProcess && !this.activeRunProcess.killed) {
+      try {
+        this.activeRunProcess.kill();
+      } catch (_) {}
+      this.activeRunProcess = null;
+    }
 
     const compileResult = await compileSourceFile(sourceFile, {
       compilerPath: this.config.get('compilerPath', 'g++'),
@@ -326,10 +411,25 @@ class DreamDebugController {
       return;
     }
 
+    this.session.programOutput = '';
+    this.pushSnapshotToWebview();
+
     const runRes = await runExecutable(compileResult.executable, {
-      stdin: this.stdinText,
-      cwd: path.dirname(sourceFile)
+      cwd: path.dirname(sourceFile),
+      stdin: this.stdinMode === 'text' ? this.stdinText : '',
+      stdinFile: this.stdinMode === 'file' ? resolvedStdinFile : '',
+      streamMode: this.stdinMode === 'stream',
+      timeoutMs: this.stdinMode === 'stream' ? 60000 : 10000,
+      onProcess: (proc) => {
+        this.activeRunProcess = proc;
+      },
+      onOutput: (_chunk, stdoutSoFar, stderrSoFar) => {
+        this.session.programOutput = `${stdoutSoFar}${stderrSoFar ? `\n[stderr]\n${stderrSoFar}` : ''}`;
+        this.pushSnapshotToWebview();
+      }
     });
+
+    this.activeRunProcess = null;
 
     const summary =
       `${runRes.stdout}${runRes.stderr ? `\n[stderr]\n${runRes.stderr}` : ''}\n` +
@@ -338,6 +438,26 @@ class DreamDebugController {
 
     this.session.programOutput = summary;
     this.pushSnapshotToWebview();
+  }
+
+  sendStreamStdin(text) {
+    if (typeof text !== 'string' || !text.length) return;
+    const line = text.endsWith('\n') ? text : `${text}\n`;
+    if (this.activeRunProcess && this.activeRunProcess.stdin && !this.activeRunProcess.killed) {
+      try {
+        this.activeRunProcess.stdin.write(line);
+      } catch (_) {}
+    }
+    this.session.sendStdin(line);
+  }
+
+  closeStreamStdin() {
+    if (this.activeRunProcess && this.activeRunProcess.stdin && !this.activeRunProcess.killed) {
+      try {
+        this.activeRunProcess.stdin.end();
+      } catch (_) {}
+    }
+    this.session.closeStdin();
   }
 
   applyCompilerDiagnostics(sourceFile, compileResult) {
@@ -472,10 +592,18 @@ class DreamDebugController {
         this.pushSnapshotToWebview();
         break;
       case 'startDebug':
-        await this.startDebugSession(msg.stdin);
+        await this.startDebugSession({
+          stdinMode: msg.stdinMode,
+          stdin: msg.stdin,
+          stdinFile: msg.stdinFile
+        });
         break;
       case 'compileAndRun':
-        await this.compileAndQuickRun(msg.stdin);
+        await this.compileAndQuickRun({
+          stdinMode: msg.stdinMode,
+          stdin: msg.stdin,
+          stdinFile: msg.stdinFile
+        });
         break;
       case 'openDashboard':
         this.openDashboardPanel(false);
@@ -493,13 +621,42 @@ class DreamDebugController {
         await this.session.stepOut();
         break;
       case 'restart':
-        await this.startDebugSession(msg.stdin);
+        await this.startDebugSession();
         break;
       case 'stop':
         await this.session.stop();
         break;
+      case 'updateStdinMode':
+        this.stdinMode = msg.mode || 'text';
+        break;
       case 'updateStdin':
         this.stdinText = msg.stdin || '';
+        break;
+      case 'pickStdinFile': {
+        const activeFile = this.resolveActiveSourceFile();
+        const defaultUri = activeFile ? vscode.Uri.file(path.dirname(activeFile)) : undefined;
+        const uris = await vscode.window.showOpenDialog({
+          canSelectMany: false,
+          openLabel: '作为标准输入 (stdin)',
+          defaultUri,
+          filters: {
+            '输入文件 (.in, .txt, .dat)': ['in', 'txt', 'dat', 'csv'],
+            '所有文件 (*)': ['*']
+          }
+        });
+        if (uris && uris.length > 0) {
+          this.updateStdinFileInfo(uris[0].fsPath);
+        }
+        break;
+      }
+      case 'setStdinFilePath':
+        this.updateStdinFileInfo(msg.filePath || '');
+        break;
+      case 'sendStreamStdin':
+        this.sendStreamStdin(msg.text || '');
+        break;
+      case 'closeStreamStdin':
+        this.closeStreamStdin();
         break;
       case 'addWatch':
         await this.session.addWatch(msg.expr);
@@ -624,38 +781,7 @@ function activate(context) {
     })
   );
 
-  // 5. Register CodeLens above main() function
-  context.subscriptions.push(
-    vscode.languages.registerCodeLensProvider(['cpp', 'c'], {
-      provideCodeLenses(document) {
-        const enabled = vscode.workspace.getConfiguration('dreamCppDebug').get('enableCodeLens', true);
-        if (!enabled) return [];
-        const text = document.getText();
-        const lenses = [];
-        const mainRegex = /^\s*(?:int|signed|void)\s+main\s*\(/gm;
-        let match;
-        while ((match = mainRegex.exec(text)) !== null) {
-          const pos = document.positionAt(match.index);
-          const range = new vscode.Range(pos.line, 0, pos.line, 0);
-          lenses.push(
-            new vscode.CodeLens(range, {
-              title: '$(debug-alt) GDB 调试 (右侧打开调试台)',
-              command: 'dream-cpp-debug.startDebug',
-              tooltip: '自动使用 g++ -g 编译并在当前窗口右半边打开 GDB 调试面板'
-            }),
-            new vscode.CodeLens(range, {
-              title: '$(play) 快速编译运行',
-              command: 'dream-cpp-debug.compileAndRun',
-              tooltip: '编译并带入左侧边栏 stdin 直接运行输出结果'
-            })
-          );
-        }
-        return lenses;
-      }
-    })
-  );
-
-  // 6. Register Native Debug Adapter (`type: "dream-cpp-gdb"`)
+  // 5. Register Native Debug Adapter (`type: "dream-cpp-gdb"`)
   context.subscriptions.push(
     vscode.debug.registerDebugConfigurationProvider('dream-cpp-gdb', {
       resolveDebugConfiguration(_folder, config) {
@@ -686,7 +812,7 @@ function activate(context) {
     })
   );
 
-  // 7. Register Extension Commands
+  // 6. Register Extension Commands
   const register = (id, handler) => {
     context.subscriptions.push(vscode.commands.registerCommand(id, handler));
   };
