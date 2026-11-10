@@ -645,16 +645,50 @@ class GDBSession extends EventEmitter {
       const varList = Array.isArray(rawVars) ? rawVars : [rawVars];
       const nextLocals = [];
 
+      const activeFrame = this.stack.find((f) => Number(f.level) === this.currentFrame) || this.stack[0];
+      const frameFile = activeFrame?.fullname || this.stopLocation?.file || this.sourceFile;
+      const frameLine = activeFrame?.line || this.stopLocation?.line || 0;
+      const frameFunc = activeFrame?.func || this.stopLocation?.func || '';
+      const declInfo = this._findLocalDeclarationLines(
+        frameFile,
+        frameLine,
+        frameFunc,
+        varList.filter((v) => v && v.name && v.arg !== '1').map((v) => v.name)
+      );
+
       for (const v of varList) {
         if (!v || !v.name) continue;
         const rawType = typeMap.get(v.name) || '';
+        const isArg = v.arg === '1';
+        const varDecl = !isArg ? declInfo.get(v.name) : null;
+
+        // If declaration line is strictly below current execution line (or currently on a non-loop declaration line),
+        // the variable's constructor/initializer has not executed yet!
+        if (varDecl && (varDecl.line > frameLine || (varDecl.line === frameLine && !varDecl.isLoopHeader))) {
+          nextLocals.push({
+            name: v.name,
+            type: rawType || 'auto',
+            kind: 'uninitialized',
+            displayValue: varDecl.line === frameLine
+              ? `⏳ 待执行本行初始化 (第 ${varDecl.line} 行)`
+              : `⏳ 尚未初始化 (第 ${varDecl.line} 行声明)`,
+            elements: null,
+            raw: v.value,
+            isArg: false,
+            changed: false
+          });
+          continue;
+        }
+
         const formatted = await this._unwrapValueIfNeeded(v.name, v.value, rawType);
         const prevVal = this.prevLocalValues.get(v.name);
-        const changed = prevVal !== undefined && prevVal !== formatted.displayValue;
-        this.prevLocalValues.set(v.name, formatted.displayValue);
+        const changed = formatted.kind !== 'uninitialized' && prevVal !== undefined && prevVal !== formatted.displayValue;
+        if (formatted.kind !== 'uninitialized') {
+          this.prevLocalValues.set(v.name, formatted.displayValue);
+        }
         nextLocals.push({
           ...formatted,
-          isArg: v.arg === '1',
+          isArg,
           changed
         });
       }
@@ -672,9 +706,101 @@ class GDBSession extends EventEmitter {
     this._emitSnapshot();
   }
 
+  /**
+   * Scan the active C/C++ source file around the current function to find the declaration line
+   * of each local variable. In C/C++, local variables cannot be referenced before their declaration,
+   * so the first appearance of `\bvarName\b` inside the function body is its declaration line.
+   */
+  _findLocalDeclarationLines(filePath, currentLine, funcName, varNames) {
+    const result = new Map();
+    if (!filePath || !currentLine || !Array.isArray(varNames) || varNames.length === 0) {
+      return result;
+    }
+    if (!fs.existsSync(filePath)) return result;
+
+    try {
+      const content = fs.readFileSync(filePath, 'utf8');
+      const lines = content.split(/\r?\n/);
+      const baseFunc = String(funcName || '')
+        .replace(/\(.*$/, '')
+        .split('::')
+        .pop()
+        .trim();
+
+      // Locate function header line scanning backwards from currentLine
+      let funcStartIdx = 0;
+      if (baseFunc && /^[a-zA-Z_]\w*$/.test(baseFunc)) {
+        const funcRe = new RegExp(`\\b${baseFunc}\\s*\\(`);
+        for (let i = Math.min(currentLine - 1, lines.length - 1); i >= 0; i--) {
+          const clean = lines[i].replace(/\/\/.*$/, '');
+          if (funcRe.test(clean) && !clean.trim().endsWith(';')) {
+            funcStartIdx = i;
+            break;
+          }
+        }
+      }
+
+      // Scan forward from funcStartIdx to find end of function and first occurrence of each varName
+      let braceDepth = 0;
+      let seenOpenBrace = false;
+      const pendingVars = new Set(varNames);
+
+      for (let i = funcStartIdx; i < lines.length && pendingVars.size > 0; i++) {
+        // Strip single-line comments and string literals
+        const cleanLine = lines[i]
+          .replace(/\/\/.*$/, '')
+          .replace(/"(?:\\.|[^"\\])*"/g, '""')
+          .replace(/'(?:\\.|[^'\\])*'/g, "''");
+
+        for (const ch of cleanLine) {
+          if (ch === '{') {
+            braceDepth++;
+            seenOpenBrace = true;
+          } else if (ch === '}') {
+            braceDepth--;
+          }
+        }
+
+        // Only match local declarations after the function signature's opening '{' (or on for/while header)
+        if (seenOpenBrace) {
+          const isLoopHeader = /^\s*(?:for|while)\s*\(/.test(cleanLine);
+          for (const vName of Array.from(pendingVars)) {
+            if (!/^[a-zA-Z_]\w*$/.test(vName)) {
+              pendingVars.delete(vName);
+              continue;
+            }
+            const idRe = new RegExp(`(?<![.\\w>])\\b${vName}\\b(?!\\s*\\()`);
+            // Skip matching the function's own name on the signature line
+            if (i === funcStartIdx && vName === baseFunc) continue;
+            if (idRe.test(cleanLine)) {
+              result.set(vName, { line: i + 1, isLoopHeader });
+              pendingVars.delete(vName);
+            }
+          }
+        }
+
+        if (seenOpenBrace && braceDepth <= 0) {
+          break;
+        }
+      }
+    } catch (_) {}
+
+    return result;
+  }
+
   async _unwrapValueIfNeeded(exprOrName, rawVal, rawType) {
     const vecPtrs = extractStdVectorPointers(rawVal);
     if (vecPtrs) {
+      if (vecPtrs.uninitialized) {
+        return {
+          name: exprOrName,
+          type: rawType || 'std::vector',
+          kind: 'uninitialized',
+          displayValue: '⏳ 尚未初始化 (未执行到构造语句)',
+          elements: null,
+          raw: rawVal
+        };
+      }
       try {
         const startAddr = BigInt(vecPtrs.startHex);
         const finishAddr = BigInt(vecPtrs.finishHex);
@@ -692,7 +818,17 @@ class GDBSession extends EventEmitter {
           `-data-evaluate-expression "(int)(${exprOrName}._M_impl._M_finish - ${exprOrName}._M_impl._M_start)"`,
           1500
         );
-        const totalLen = Math.max(0, parseInt(lenRes?.results?.value ?? '0', 10));
+        const totalLen = parseInt(lenRes?.results?.value ?? '0', 10);
+        if (isNaN(totalLen) || totalLen < 0 || totalLen > 100000) {
+          return {
+            name: exprOrName,
+            type: rawType || 'std::vector',
+            kind: 'uninitialized',
+            displayValue: '⏳ 尚未初始化 (未执行到构造语句)',
+            elements: null,
+            raw: rawVal
+          };
+        }
         const previewCount = Math.min(totalLen, this.maxArrayPreview);
         if (previewCount > 0) {
           const elemRes = await this.sendCommand(
@@ -700,6 +836,9 @@ class GDBSession extends EventEmitter {
             1500
           );
           const elemFormatted = formatCppVariable(exprOrName, elemRes?.results?.value ?? '{}', rawType || `vector[${totalLen}]`);
+          if (elemFormatted.kind === 'uninitialized') {
+            return elemFormatted;
+          }
           return {
             ...elemFormatted,
             type: rawType || `std::vector[${totalLen}]`,

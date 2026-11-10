@@ -408,8 +408,9 @@ class DreamDebugController {
     editor.setDecorations(this.pausedLineDecoration, [lineRange]);
 
     const showInline = vscode.workspace.getConfiguration('dreamCppDebug').get('showInlineValues', true);
-    if (showInline && this.session.locals.length > 0) {
-      const summary = this.session.locals
+    const initializedLocals = this.session.locals.filter((v) => v.kind !== 'uninitialized');
+    if (showInline && initializedLocals.length > 0) {
+      const summary = initializedLocals
         .slice(0, 5)
         .map((v) => `${v.name} = ${v.displayValue}`)
         .join('  │  ');

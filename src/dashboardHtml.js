@@ -398,6 +398,12 @@ function getDashboardHtml(options = {}) {
     }
     .var-val.string { color: var(--var-str-color); }
     .var-val.pointer { color: var(--var-ptr-color); }
+    .var-val.uninitialized {
+      color: var(--fg-muted);
+      font-weight: 500;
+      font-style: italic;
+      font-size: 12px;
+    }
 
     .icon-action {
       background: var(--bg-card-header);
@@ -784,7 +790,10 @@ function getDashboardHtml(options = {}) {
       });
 
       function renderVariableCard(v, options = {}) {
-        const valClass = v.kind === 'string' ? 'string' : v.kind === 'pointer' ? 'pointer' : '';
+        const valClass =
+          v.kind === 'uninitialized' ? 'uninitialized' :
+          v.kind === 'string' ? 'string' :
+          v.kind === 'pointer' ? 'pointer' : '';
         let arrayHtml = '';
         if (Array.isArray(v.elements) && v.elements.length > 0 && v.kind === 'array') {
           const cells = v.elements.map((item, idx) =>
@@ -798,6 +807,8 @@ function getDashboardHtml(options = {}) {
 
         const actionBtn = options.isWatch
           ? '<button class="icon-action" data-remove-watch="' + escapeHtml(v.id || v.expr) + '" title="移除监视">✕ 移除</button>'
+          : v.kind === 'uninitialized'
+          ? ''
           : '<button class="icon-action" data-edit-var="' + escapeHtml(v.name) + '" data-cur-val="' + escapeHtml(v.displayValue) + '" title="修改变量值">✎ 修改值</button>';
 
         return (

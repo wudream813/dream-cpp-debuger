@@ -2,6 +2,13 @@
 
 All notable changes to the **Dream C++ Debugger (GDB)** extension will be documented in this file.
 
+## [1.1.1] - 2026-11-09
+
+### Fixed
+- **修复局部变量尚未执行到声明行时，`std::vector` / `std::string` 读取未初始化栈内存报错的问题**：
+  - **原因**：当断点停在函数前部（例如 `main()` 第 17 行入口）时，后续行（如第 24 行 `vector<int> fib`）虽已在 DWARF 栈帧符号表中，但其构造函数尚未执行，栈内存中 `_M_start` / `_M_finish` 为随机脏数据，导致 GDB Python Pretty-Printer 输出 `std::vector of length 3850240, capacity 3855324 = {<error reading variable: Cannot access memory at address 0x0>}`。
+  - **修复**：新增 **源码声明行号感知 (`_findLocalDeclarationLines`)** 与 **STL 容器未初始化内存校验 (`isUninitializedOrCorruptGdbValue` / `extractStdVectorPointers`)** 双重保护。对于当前执行行尚未到达声明处的局部变量，清晰显示为 `⏳ 尚未初始化 (第 X 行声明)`，待单步执行越过声明行后再自动解包展示真实元素格子。
+
 ## [1.1.0] - 2026-11-09
 
 ### Changed & Added

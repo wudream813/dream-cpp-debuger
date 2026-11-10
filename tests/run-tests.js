@@ -69,7 +69,22 @@ async function runAllTests() {
   assert.ok(ptrs);
   assert.strictEqual(ptrs.startHex, '0x55555556b2b0');
   assert.strictEqual(ptrs.finishHex, '0x55555556b2c0');
+  assert.strictEqual(ptrs.uninitialized, false);
   ok('extractStdVectorPointers extracts _M_start and _M_finish from raw libstdc++ vector');
+
+  // Test uninitialized std::vector detection (both pretty-printed error & raw garbage pointers)
+  const uninitPrettyVec = formatCppVariable(
+    'fib',
+    'std::vector of length 3850240, capacity 3855324 = {<error reading variable: Cannot access memory at address 0x0>}',
+    'std::vector<int>'
+  );
+  assert.strictEqual(uninitPrettyVec.kind, 'uninitialized');
+  assert.ok(uninitPrettyVec.displayValue.includes('尚未初始化'));
+  const uninitRawVec = extractStdVectorPointers(
+    '{<std::_Vector_base<int, std::allocator<int> >> = {_M_impl = {_M_start = 0x0, _M_finish = 0x5555555592a0, _M_end_of_storage = 0x11ff}}}'
+  );
+  assert.ok(uninitRawVec && uninitRawVec.uninitialized === true);
+  ok('formatCppVariable & extractStdVectorPointers detect uninitialized std::vector stack garbage');
 
   const rawStr = '{_M_dataplus = {_M_p = 0x7fffffffead0 "Hello Dream"}, _M_string_length = 11}';
   assert.strictEqual(extractStdStringValue(rawStr), '"Hello Dream"');
@@ -140,7 +155,10 @@ async function runAllTests() {
   const firstStop = await pausedAtMain;
   assert.strictEqual(firstStop.state, 'paused');
   assert.strictEqual(firstStop.location.func, 'main');
-  ok(`GDBSession started and paused at main() entry (line ${firstStop.location.line})`);
+  const fibAtEntry = session.locals.find((v) => v.name === 'fib');
+  assert.ok(fibAtEntry && fibAtEntry.kind === 'uninitialized', 'fib on line 24 should be marked uninitialized when paused at line 17');
+  assert.ok(fibAtEntry.displayValue.includes('第 24 行声明'));
+  ok(`GDBSession started and paused at main() entry (line ${firstStop.location.line}) and marked future variables as uninitialized`);
 
   // Continue to breakpoint inside computePrefixSum (line 11)
   const waitNextPause = () =>

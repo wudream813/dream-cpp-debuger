@@ -2,7 +2,7 @@
   "name": "dream-cpp-debuger",
   "displayName": "Dream C++ Debugger (GDB)",
   "description": "现代简洁的 C/C++ GDB 调试器扩展 —— 零配置一键编译调试、现代化侧边栏面板、STL/数组可视化、条件断点、标准输入(stdin)注入与行内变量实时预览。",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "publisher": "wudream",
   "author": {
     "name": "wudream813"

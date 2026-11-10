@@ -263,8 +263,35 @@ function parseMILine(rawLine) {
 }
 
 /**
+ * Check if a GDB value string represents an uninitialized or unreadable memory error
+ * (e.g. `std::vector of length 3850240, capacity 3855324 = {<error reading variable: Cannot access memory at address 0x0>}`).
+ */
+function isUninitializedOrCorruptGdbValue(rawVal) {
+  if (typeof rawVal !== 'string') return false;
+  if (
+    rawVal.includes('<error reading variable') ||
+    rawVal.includes('Cannot access memory at address') ||
+    rawVal.includes('<address of value unknown>')
+  ) {
+    return true;
+  }
+
+  // Check pretty-printed std::vector length/capacity sanity
+  const vecHeader = rawVal.match(/^std::vector of length (-?\d+),\s*capacity (-?\d+)/);
+  if (vecHeader) {
+    const len = parseInt(vecHeader[1], 10);
+    const cap = parseInt(vecHeader[2], 10);
+    if (len < 0 || cap < 0 || cap < len || len > 1000000) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Detect raw libstdc++ std::vector internal pointers when Python pretty-printing is unavailable.
- * Returns { startHex, finishHex, capacityHex } or null.
+ * Also validates pointer invariants so uninitialized stack garbage is detected immediately.
+ * Returns { startHex, finishHex, capacityHex, uninitialized } or null.
  */
 function extractStdVectorPointers(rawVal) {
   if (typeof rawVal !== 'string' || !rawVal.includes('_M_start') || !rawVal.includes('_M_finish')) {
@@ -274,10 +301,39 @@ function extractStdVectorPointers(rawVal) {
   const finishMatch = rawVal.match(/_M_finish\s*=\s*(0x[0-9a-fA-F]+)/);
   const capMatch = rawVal.match(/_M_end_of_storage\s*=\s*(0x[0-9a-fA-F]+)/);
   if (!startMatch || !finishMatch) return null;
+
+  const startHex = startMatch[1];
+  const finishHex = finishMatch[1];
+  const capacityHex = capMatch ? capMatch[1] : null;
+
+  try {
+    const start = BigInt(startHex);
+    const finish = BigInt(finishHex);
+    const cap = capacityHex ? BigInt(capacityHex) : finish;
+
+    // Uninitialized stack memory check:
+    // 1. start == 0 but finish != 0 (or cap != 0)
+    // 2. finish < start or cap < finish
+    // 3. byte span > 16 MB or misaligned strange addresses
+    const byteSpan = finish - start;
+    const capSpan = cap - start;
+    if (
+      (start === 0n && (finish !== 0n || cap !== 0n)) ||
+      finish < start ||
+      cap < finish ||
+      byteSpan > 0x1000000n ||
+      capSpan > 0x4000000n ||
+      (start > 0n && start < 0x1000n)
+    ) {
+      return { startHex, finishHex, capacityHex, uninitialized: true };
+    }
+  } catch (_) {}
+
   return {
-    startHex: startMatch[1],
-    finishHex: finishMatch[1],
-    capacityHex: capMatch ? capMatch[1] : null
+    startHex,
+    finishHex,
+    capacityHex,
+    uninitialized: false
   };
 }
 
@@ -287,6 +343,16 @@ function extractStdVectorPointers(rawVal) {
 function extractStdStringValue(rawVal) {
   if (typeof rawVal !== 'string' || !rawVal.includes('_M_dataplus')) {
     return null;
+  }
+  const lenMatch = rawVal.match(/_M_string_length\s*=\s*(\d+)/);
+  if (lenMatch) {
+    const strLen = parseInt(lenMatch[1], 10);
+    if (strLen > 100000) {
+      return '__UNINITIALIZED__';
+    }
+  }
+  if (rawVal.includes('<error reading variable') || rawVal.includes('Cannot access memory')) {
+    return '__UNINITIALIZED__';
   }
   const m = rawVal.match(/_M_p\s*=\s*0x[0-9a-fA-F]+\s+"((?:\\.|[^"\\])*)"/);
   if (m) {
@@ -300,8 +366,15 @@ function extractStdStringValue(rawVal) {
  */
 function parseBraceElements(rawVal) {
   if (typeof rawVal !== 'string') return null;
+  if (isUninitializedOrCorruptGdbValue(rawVal)) return null;
+
   let trimmed = rawVal.trim();
-  // Also support pretty-printed std::vector like: `std::vector of length 3, capacity 4 = {10, 20, 30}`
+  // Support empty pretty-printed std::vector: `std::vector of length 0, capacity 0`
+  if (/^std::vector of length 0,\s*capacity \d+\s*$/.test(trimmed)) {
+    return [];
+  }
+
+  // Support pretty-printed std::vector: `std::vector of length 3, capacity 4 = {10, 20, 30}`
   const eqBrace = trimmed.match(/=\s*(\{[\s\S]*\})$/);
   if (eqBrace) {
     trimmed = eqBrace[1].trim();
@@ -365,8 +438,30 @@ function formatCppVariable(name, rawValue, rawType = '') {
   const valStr = String(rawValue ?? '').trim();
   const typeStr = String(rawType ?? '').trim();
 
+  // 0. Check for uninitialized / corrupt GDB memory errors first
+  if (isUninitializedOrCorruptGdbValue(valStr)) {
+    return {
+      name,
+      type: typeStr || 'auto',
+      kind: 'uninitialized',
+      displayValue: '⏳ 尚未初始化 (未执行到构造语句)',
+      elements: null,
+      raw: valStr
+    };
+  }
+
   // 1. Check raw std::string
   const stdStr = extractStdStringValue(valStr);
+  if (stdStr === '__UNINITIALIZED__') {
+    return {
+      name,
+      type: typeStr || 'std::string',
+      kind: 'uninitialized',
+      displayValue: '⏳ 尚未初始化 (未执行到构造语句)',
+      elements: null,
+      raw: valStr
+    };
+  }
   if (stdStr !== null) {
     return {
       name,
@@ -395,11 +490,15 @@ function formatCppVariable(name, rawValue, rawType = '') {
   if (elements !== null) {
     const isStruct = elements.some((e) => /^[a-zA-Z_]\w*\s*=/.test(e));
     if (!isStruct) {
+      const isVec = typeStr.includes('vector') || valStr.startsWith('std::vector');
+      const prefixLabel = isVec ? `vector[${elements.length}]` : `[${elements.length}]`;
       return {
         name,
-        type: typeStr || `array[${elements.length}]`,
+        type: typeStr || (isVec ? `std::vector[${elements.length}]` : `array[${elements.length}]`),
         kind: 'array',
-        displayValue: `[${elements.length}] { ${elements.slice(0, 12).join(', ')}${elements.length > 12 ? ', ...' : ''} }`,
+        displayValue: elements.length === 0
+          ? `${prefixLabel} {}`
+          : `${prefixLabel} { ${elements.slice(0, 12).join(', ')}${elements.length > 12 ? ', ...' : ''} }`,
         elements,
         raw: valStr
       };
@@ -440,6 +539,7 @@ function formatCppVariable(name, rawValue, rawType = '') {
 module.exports = {
   unescapeMIString,
   parseMILine,
+  isUninitializedOrCorruptGdbValue,
   extractStdVectorPointers,
   extractStdStringValue,
   parseBraceElements,
