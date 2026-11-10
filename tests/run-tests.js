@@ -211,8 +211,55 @@ async function runAllTests() {
     `Expected modified output 777, got: ${session.programOutput}`
   );
   await session.stop();
-  fs.rmSync(path.join(__dirname, '..', 'examples', '.dream-debug'), { recursive: true, force: true });
   ok('GDBSession captured modified stdout output and exited cleanly');
+
+  // Test starting a 2nd and 3rd debug session on the SAME GDBSession instance (regression test for 2nd-run failure)
+  await session.clearAllBreakpoints();
+  const waitPause = () =>
+    new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('Timeout waiting for pause on repeated start')), 8000);
+      const onStatus = (ev) => {
+        if (ev.state === 'paused') {
+          clearTimeout(timer);
+          session.removeListener('status', onStatus);
+          resolve(ev);
+        }
+      };
+      session.on('status', onStatus);
+    });
+
+  // 2nd run (after 1st session exited)
+  const secondPausePromise = waitPause();
+  await session.start({
+    executable: compileRes.executable,
+    sourceFile: demoSource,
+    stdin: '4\n',
+    stopAtMain: true
+  });
+  const secondStop = await secondPausePromise;
+  assert.strictEqual(secondStop.state, 'paused');
+  assert.strictEqual(secondStop.location.func, 'main');
+  ok('GDBSession 2nd consecutive start() succeeded without race condition');
+
+  // 3rd run (restarting while 2nd session is still paused!)
+  const thirdPausePromise = waitPause();
+  await session.start({
+    executable: compileRes.executable,
+    sourceFile: demoSource,
+    stdin: '3\n',
+    stopAtMain: true
+  });
+  const thirdStop = await thirdPausePromise;
+  assert.strictEqual(thirdStop.state, 'paused');
+  assert.strictEqual(thirdStop.location.func, 'main');
+
+  const thirdExitPromise = waitNextPause();
+  await session.continue();
+  const thirdExit = await thirdExitPromise;
+  assert.strictEqual(thirdExit.state, 'exited');
+  await session.stop();
+  fs.rmSync(path.join(__dirname, '..', 'examples', '.dream-debug'), { recursive: true, force: true });
+  ok('GDBSession 3rd consecutive start() (mid-session restart) succeeded and exited cleanly');
 
   console.log('\n=== 4. Sidebar Webview HTML Verification ===');
   const html = getSidebarHtml({ nonce: 'test-nonce', demoMode: true });

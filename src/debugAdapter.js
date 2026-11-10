@@ -238,6 +238,8 @@ class DreamGdbDebugAdapter {
     let targetProgram = cfg.program;
     let sourceFile = null;
 
+    await this.session.stop();
+
     if (isSourceFile(targetProgram)) {
       sourceFile = targetProgram;
       const compileRes = await compileSourceFile(sourceFile, {

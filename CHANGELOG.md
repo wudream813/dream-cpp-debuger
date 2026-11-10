@@ -2,6 +2,14 @@
 
 All notable changes to the **Dream C++ Debugger (GDB)** extension will be documented in this file.
 
+## [1.0.2] - 2026-11-09
+
+### Fixed
+- **修复第二次及后续 GDB 调试提示“启动 GDB 失败”的竞态问题**：
+  - **原因 1（进程关闭事件竞态）**：旧版 `stop()` 发送 `-gdb-exit` 后未等待旧 GDB 进程完全退出便立即置空 `this.proc` 并启动新 GDB 进程；数毫秒后旧 GDB 进程退出触发 `close` 事件，误将新会话的 `this.pending` 命令队列全部以 `GDB 进程已退出` 拒绝，并删除了新会话的临时 `stdin.txt` / `stdout.txt`，同时 `stop()` 中残留的 `300ms` 定时器误杀了新启动的 `this.proc`。
+  - **原因 2（可执行文件占用锁）**：第一次调试被调程序结束（`exited-normally`）后底层 `gdb` 进程未主动退出，且重新编译前未先终止旧 `gdb`，在 Windows 下会导致 `.exe` 被占用。
+  - **修复方案**：为每次会话引入独立的 `sessionId`、闭包绑定的 `proc` 与独立临时目录；重构 `stop()` 异步等待旧进程彻底退出后再返回；在程序 `exited` 时自动退出底层 GDB 进程；编译前先 `await this.session.stop()`，并在可执行文件被系统锁定时自动回退到唯一文件名。
+
 ## [1.0.1] - 2026-11-09
 
 ### Fixed & Improved

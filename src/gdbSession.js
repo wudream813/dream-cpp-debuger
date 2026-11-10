@@ -36,6 +36,7 @@ class GDBSession extends EventEmitter {
     this.maxArrayPreview = options.maxArrayPreview || 16;
 
     this.proc = null;
+    this.sessionId = 0;
     this.state = 'idle'; // 'idle' | 'starting' | 'running' | 'paused' | 'exited' | 'error'
     this.executable = null;
     this.sourceFile = null;
@@ -75,25 +76,36 @@ class GDBSession extends EventEmitter {
 
   /**
    * Start a new GDB MI2 debugging session on a compiled executable.
+   * Safely awaits complete termination of any previous GDB process first.
    */
   async start(config = {}) {
     await this.stop();
 
+    const currentSessionId = ++this.sessionId;
     this.executable = config.executable;
     this.sourceFile = config.sourceFile || null;
     this.cwd = config.cwd || (this.executable ? path.dirname(this.executable) : process.cwd());
     this.state = 'starting';
     this.programOutput = '';
+    this.stdoutBuffer = '';
     this.stdoutReadOffset = 0;
     this.prevLocalValues.clear();
     this.currentFrame = 0;
+    this.inferiorPid = null;
+    this.stack = [];
+    this.locals = [];
+    this.registers = [];
 
-    // Prepare temp directory for inferior stdin & stdout redirection
-    this.tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dream-gdb-'));
-    this.stdinFile = path.join(this.tempDir, 'stdin.txt');
-    this.stdoutFile = path.join(this.tempDir, 'stdout.txt');
-    fs.writeFileSync(this.stdinFile, typeof config.stdin === 'string' ? config.stdin : '', 'utf8');
-    fs.writeFileSync(this.stdoutFile, '', 'utf8');
+    // Prepare isolated temp directory for this session's stdin & stdout redirection
+    const sessionTempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dream-gdb-'));
+    const sessionStdinFile = path.join(sessionTempDir, 'stdin.txt');
+    const sessionStdoutFile = path.join(sessionTempDir, 'stdout.txt');
+    fs.writeFileSync(sessionStdinFile, typeof config.stdin === 'string' ? config.stdin : '', 'utf8');
+    fs.writeFileSync(sessionStdoutFile, '', 'utf8');
+
+    this.tempDir = sessionTempDir;
+    this.stdinFile = sessionStdinFile;
+    this.stdoutFile = sessionStdoutFile;
 
     const gdbArgs = ['--interpreter=mi2', '--quiet', this.executable];
     this.emit('output', {
@@ -101,28 +113,37 @@ class GDBSession extends EventEmitter {
       text: `[Dream GDB] 启动调试会话: ${this.gdbPath} ${gdbArgs.join(' ')}`
     });
 
+    let proc;
     try {
-      this.proc = spawn(this.gdbPath, gdbArgs, {
+      proc = spawn(this.gdbPath, gdbArgs, {
         cwd: this.cwd,
         env: process.env
       });
+      this.proc = proc;
     } catch (err) {
       this.state = 'error';
       this.emit('status', { state: 'error', reason: err.message });
       throw err;
     }
 
-    this.proc.stdout.on('data', (chunk) => this._onStdoutData(chunk));
-    this.proc.stderr.on('data', (chunk) => {
+    let spawnError = null;
+
+    proc.stdout.on('data', (chunk) => {
+      if (this.proc !== proc || this.sessionId !== currentSessionId) return;
+      this._onStdoutData(chunk);
+    });
+
+    proc.stderr.on('data', (chunk) => {
+      if (this.proc !== proc || this.sessionId !== currentSessionId) return;
       const text = chunk.toString();
       if (text.trim()) {
         this.emit('output', { category: 'log', text: text.trim() });
       }
     });
 
-    let spawnError = null;
-    this.proc.on('error', (err) => {
+    proc.on('error', (err) => {
       spawnError = err;
+      if (this.proc !== proc || this.sessionId !== currentSessionId) return;
       this.state = 'error';
       this.emit('output', {
         category: 'system',
@@ -131,21 +152,32 @@ class GDBSession extends EventEmitter {
       this.emit('status', { state: 'error', reason: err.message });
     });
 
-    this.proc.on('close', (code) => {
-      this._stopOutputWatcher();
-      this._pollProgramOutput();
-      for (const [, req] of this.pending) {
-        clearTimeout(req.timer);
-        req.reject(new Error('GDB 进程已退出'));
+    proc.on('close', (code) => {
+      // Always clean up this specific process's temp dir when it closes
+      if (this.proc === proc && this.sessionId === currentSessionId) {
+        this._stopOutputWatcher();
+        this._pollProgramOutput();
+        this.proc = null;
+        for (const [, req] of this.pending) {
+          clearTimeout(req.timer);
+          req.reject(new Error('GDB 进程已退出'));
+        }
+        this.pending.clear();
+        if (this.state !== 'exited' && this.state !== 'idle') {
+          this.state = 'exited';
+          this.stopLocation = null;
+          this.emit('status', { state: 'exited', reason: 'gdb-closed', exitCode: code });
+          this._emitSnapshot();
+        }
+        this._cleanupTempFiles(sessionTempDir);
+      } else {
+        // An older GDB process finished closing; only clean up its own temp folder!
+        try {
+          if (sessionTempDir && fs.existsSync(sessionTempDir)) {
+            fs.rmSync(sessionTempDir, { recursive: true, force: true });
+          }
+        } catch (_) {}
       }
-      this.pending.clear();
-      if (this.state !== 'exited') {
-        this.state = 'exited';
-        this.stopLocation = null;
-        this.emit('status', { state: 'exited', reason: 'gdb-closed', exitCode: code });
-        this._emitSnapshot();
-      }
-      this._cleanupTempFiles();
     });
 
     this._startOutputWatcher();
@@ -154,7 +186,7 @@ class GDBSession extends EventEmitter {
     try {
       await this.sendCommand('-enable-pretty-printing');
     } catch (err) {
-      if (spawnError || !this.proc || !this.stdinFile) {
+      if (spawnError || this.proc !== proc) {
         throw new Error(`未找到或无法启动 GDB (${this.gdbPath})，请确认系统已安装 GDB 并加入 PATH`);
       }
     }
@@ -163,7 +195,7 @@ class GDBSession extends EventEmitter {
     await this.sendCommand('-gdb-set pagination off').catch(() => {});
     await this.sendCommand('-gdb-set confirm off').catch(() => {});
 
-    if (spawnError || !this.stdinFile || !this.stdoutFile) {
+    if (spawnError || this.proc !== proc) {
       throw new Error(`未找到或无法启动 GDB (${this.gdbPath})，请确认系统已安装 GDB 并加入 PATH`);
     }
 
@@ -177,8 +209,8 @@ class GDBSession extends EventEmitter {
 
     // Configure arguments + stdin/stdout redirection
     const userArgs = Array.isArray(config.args) ? config.args.join(' ') : '';
-    const escIn = this.stdinFile.replace(/\\/g, '/');
-    const escOut = this.stdoutFile.replace(/\\/g, '/');
+    const escIn = sessionStdinFile.replace(/\\/g, '/');
+    const escOut = sessionStdoutFile.replace(/\\/g, '/');
     const redirectArgs = `${userArgs} < "${escIn}" > "${escOut}" 2>&1`.trim();
     await this.sendCommand(`-exec-arguments ${redirectArgs}`).catch(() => {});
 
@@ -194,7 +226,7 @@ class GDBSession extends EventEmitter {
    */
   sendCommand(command, timeoutMs = 8000) {
     return new Promise((resolve, reject) => {
-      if (!this.proc || !this.proc.stdin.writable) {
+      if (!this.proc || !this.proc.stdin || !this.proc.stdin.writable) {
         return reject(new Error('GDB 未运行'));
       }
       const token = this.tokenCounter++;
@@ -206,7 +238,13 @@ class GDBSession extends EventEmitter {
       }, timeoutMs);
 
       this.pending.set(token, { resolve, reject, command, timer });
-      this.proc.stdin.write(`${token}${command}\n`);
+      try {
+        this.proc.stdin.write(`${token}${command}\n`);
+      } catch (err) {
+        clearTimeout(timer);
+        this.pending.delete(token);
+        reject(err);
+      }
     });
   }
 
@@ -270,31 +308,69 @@ class GDBSession extends EventEmitter {
         this.proc.kill('SIGINT');
       }
     } catch (_) {
-      this.proc.kill('SIGINT');
+      try { this.proc.kill('SIGINT'); } catch (__) {}
     }
   }
 
-  async stop() {
+  /**
+   * Completely stop the current GDB process and wait until the OS process has exited
+   * so that subsequent compilations or restarts never collide with a lingering GDB instance.
+   */
+  async stop(options = {}) {
     this._stopOutputWatcher();
-    if (!this.proc) {
+    this._pollProgramOutput();
+
+    const oldProc = this.proc;
+    const oldTempDir = this.tempDir;
+    this.proc = null;
+    this.stdoutBuffer = '';
+
+    // Clear any pending commands from the old process
+    for (const [, req] of this.pending) {
+      clearTimeout(req.timer);
+      req.reject(new Error('调试会话已终止'));
+    }
+    this.pending.clear();
+
+    // Reset GDB breakpoint numbers so next start() re-inserts them cleanly
+    for (const bp of this.breakpoints.values()) {
+      bp.gdbNumber = null;
+    }
+
+    if (oldProc) {
+      await new Promise((resolve) => {
+        let settled = false;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          resolve();
+        };
+
+        oldProc.once('close', finish);
+
+        try {
+          if (oldProc.stdin && oldProc.stdin.writable) {
+            oldProc.stdin.write('-gdb-exit\n');
+          }
+        } catch (_) {}
+
+        setTimeout(() => {
+          if (!settled) {
+            try { oldProc.kill('SIGKILL'); } catch (_) {}
+            setTimeout(finish, 80);
+          }
+        }, 200);
+      });
+    }
+
+    this._cleanupTempFiles(oldTempDir);
+
+    if (!options.keepStateExited) {
       this.state = 'idle';
       this.stopLocation = null;
-      return;
+      this.emit('status', { state: 'idle', reason: 'stopped' });
+      this._emitSnapshot();
     }
-    try {
-      this.sendCommand('-gdb-exit', 1000).catch(() => {});
-      setTimeout(() => {
-        if (this.proc) {
-          try { this.proc.kill('SIGKILL'); } catch (_) {}
-        }
-      }, 300);
-    } catch (_) {}
-    this.proc = null;
-    this.state = 'idle';
-    this.stopLocation = null;
-    this._cleanupTempFiles();
-    this.emit('status', { state: 'idle', reason: 'stopped' });
-    this._emitSnapshot();
   }
 
   // ── Breakpoint Management ──
@@ -765,6 +841,8 @@ class GDBSession extends EventEmitter {
         category: 'system',
         text: `[Dream GDB] 程序执行结束 (${reason}, exitCode=${exitCode})`
       });
+      // Immediately release the underlying GDB process so the binary file is unlocked for recompilation
+      await this.stop({ keepStateExited: true });
       this.emit('status', { state: 'exited', reason, exitCode });
       this._emitSnapshot();
       return;
@@ -827,15 +905,18 @@ class GDBSession extends EventEmitter {
     } catch (_) {}
   }
 
-  _cleanupTempFiles() {
-    if (this.tempDir && fs.existsSync(this.tempDir)) {
+  _cleanupTempFiles(targetDir) {
+    const dirToClean = targetDir || this.tempDir;
+    if (dirToClean && fs.existsSync(dirToClean)) {
       try {
-        fs.rmSync(this.tempDir, { recursive: true, force: true });
+        fs.rmSync(dirToClean, { recursive: true, force: true });
       } catch (_) {}
     }
-    this.tempDir = null;
-    this.stdinFile = null;
-    this.stdoutFile = null;
+    if (!targetDir || targetDir === this.tempDir) {
+      this.tempDir = null;
+      this.stdinFile = null;
+      this.stdoutFile = null;
+    }
   }
 
   getSnapshot() {

@@ -85,12 +85,25 @@ function compileSourceFile(sourceFile, options = {}) {
       fs.mkdirSync(outDir, { recursive: true });
     }
 
-    const exeName = process.platform === 'win32' ? `${baseName}.exe` : `${baseName}.debug.out`;
-    const outputBinary = options.outputBinary || path.join(outDir, exeName);
+    const extSuffix = process.platform === 'win32' ? '.exe' : '.debug.out';
+    let outputBinary = options.outputBinary || path.join(outDir, `${baseName}${extSuffix}`);
 
-    // Remove stale binary before compiling so we never mistake an old binary for a fresh compile
+    // Clean up old binaries in outDir when possible; if default binary is still locked by OS, use a fresh filename
+    try {
+      for (const f of fs.readdirSync(outDir)) {
+        if (f.startsWith(baseName) && (f.endsWith('.exe') || f.endsWith('.debug.out'))) {
+          try { fs.unlinkSync(path.join(outDir, f)); } catch (_) {}
+        }
+      }
+    } catch (_) {}
+
     if (fs.existsSync(outputBinary)) {
-      try { fs.unlinkSync(outputBinary); } catch (_) {}
+      try {
+        fs.unlinkSync(outputBinary);
+      } catch (_) {
+        // File is still locked by OS (common on Windows right after GDB exits); use unique binary path
+        outputBinary = path.join(outDir, `${baseName}_${Date.now()}${extSuffix}`);
+      }
     }
 
     const args = [...flags, absSource, '-o', outputBinary];

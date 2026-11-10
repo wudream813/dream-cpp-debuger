@@ -189,6 +189,9 @@ class DreamDebugController {
     this.sidebarProvider.reveal();
     this.config = vscode.workspace.getConfiguration('dreamCppDebug');
 
+    // Ensure any previous GDB process is completely terminated before compiling (prevents .exe file lock on Windows)
+    await this.session.stop();
+
     this.statusBarItem.text = '$(sync~spin) 正在编译 C++ 源码...';
     this.outputChannel.appendLine(`[Dream Compiler] 正在编译: ${sourceFile}`);
 
@@ -242,6 +245,8 @@ class DreamDebugController {
 
     this.sidebarProvider.reveal();
     this.config = vscode.workspace.getConfiguration('dreamCppDebug');
+
+    await this.session.stop();
 
     const compileResult = await compileSourceFile(sourceFile, {
       compilerPath: this.config.get('compilerPath', 'g++'),
