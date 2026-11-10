@@ -502,9 +502,27 @@ int main() {
     await stepSession.continue();
     const endEv = await p;
     assert.strictEqual(endEv.state, 'exited');
+    assert.ok(stepSession.getSnapshot().programOutput.length > 0, 'Expected program output after first run');
+    const prevSessionId = stepSession.getSnapshot().sessionId;
+
+    // Restart session and verify programOutput is immediately cleared and sessionId incremented
+    p = waitStepStop();
+    await stepSession.start({
+      executable: compileRes.executable,
+      sourceFile: demoSource,
+      stdin: '5\n',
+      stopAtMain: true
+    });
+    await p;
+    const restartedSnap = stepSession.getSnapshot();
+    assert.ok(restartedSnap.sessionId > prevSessionId, 'sessionId should increment on restart');
+    assert.strictEqual(restartedSnap.programOutput, '', 'programOutput must be cleared immediately on restart');
+    assert.ok(sidebarHtml.includes('snap.streamHistory'), 'Sidebar must sync and clear streamHistory on snapshot');
+    assert.ok(sidebarHtml.includes('snap.runId !== lastRunId'), 'Sidebar must reset streamHistory on every new run');
+
     await stepSession.stop();
     fs.rmSync(path.join(__dirname, '..', 'examples', '.dream-debug'), { recursive: true, force: true });
-    ok('StepInto + StepOut across main(), STL constructors, and user functions keeps all step/continue buttons responsive');
+    ok('StepInto + StepOut across main(), STL constructors, and user functions + clean output/stream reset on restart verified');
   }
 
   const dashHtml = getDashboardHtml({ nonce: 'test-nonce' });
@@ -515,6 +533,9 @@ int main() {
   assert.ok(dashHtml.includes('GDB 交互命令台 & CPU 寄存器'));
   assert.ok(dashHtml.includes('body.vscode-light'));
   ok('Right Dashboard (getDashboardHtml) renders full spacious GDB inspection workspace');
+
+  await require('./reset-tests').testResets();
+  ok('Sidebar and controller reset history/output across restart and ignore late previous-run output');
 
   console.log(`\n🎉 All ${passed} tests passed!`);
 }

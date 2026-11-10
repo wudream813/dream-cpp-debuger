@@ -221,7 +221,7 @@ function runExecutable(executablePath, options = {}) {
       const text = chunk.toString();
       stdout += text;
       if (typeof options.onOutput === 'function') {
-        options.onOutput(text, stdout);
+        options.onOutput(text, stdout, 'stdout');
       }
     });
 
@@ -229,7 +229,7 @@ function runExecutable(executablePath, options = {}) {
       const text = chunk.toString();
       stderr += text;
       if (typeof options.onOutput === 'function') {
-        options.onOutput(text, stdout + (stderr ? `\n[stderr]\n${stderr}` : ''));
+        options.onOutput(text, stdout + (stderr ? `\n[stderr]\n${stderr}` : ''), 'stderr');
       }
     });
 

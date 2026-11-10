@@ -66,6 +66,10 @@ class DreamDebugController {
     this.stdinText = '';
     this.stdinFile = '';
     this.stdinFilePreview = '';
+    this.streamHistory = [];
+    this.runId = 0;
+    this.resettingRunId = null;
+    this.quickRunSawStderr = false;
     this.activeRunProcess = null;
 
     this.lastTargetFile = null;
@@ -275,12 +279,15 @@ class DreamDebugController {
 
   pushSnapshotToWebview() {
     const snap = this.session.getSnapshot();
+    if (this.resettingRunId === this.runId) snap.programOutput = '';
     const activeFile = this.resolveActiveSourceFile();
     snap.activeFileName = activeFile ? path.basename(activeFile) : '';
     snap.stdinMode = this.stdinMode;
     snap.stdinText = this.stdinText;
     snap.stdinFile = this.stdinFile;
     snap.stdinFilePreview = this.stdinFilePreview;
+    snap.streamHistory = this.streamHistory.slice();
+    snap.runId = this.runId;
     this.postToAllViews({
       type: 'snapshot',
       snapshot: snap
@@ -309,6 +316,17 @@ class DreamDebugController {
       return;
     }
 
+    const runId = ++this.runId;
+    this.resettingRunId = runId;
+    this.quickRunSawStderr = false;
+    this.streamHistory = [];
+    this.session.programOutput = '';
+    this.pushSnapshotToWebview();
+    if (this.activeRunProcess) {
+      try { this.activeRunProcess.kill(); } catch (_) {}
+      this.activeRunProcess = null;
+    }
+
     // Save dirty document before compiling
     const openDoc = vscode.workspace.textDocuments.find((d) => d.fileName === sourceFile);
     if (openDoc && openDoc.isDirty) {
@@ -318,8 +336,13 @@ class DreamDebugController {
     this.sidebarProvider.reveal();
     this.config = vscode.workspace.getConfiguration('dreamCppDebug');
 
-    // Ensure any previous GDB process is completely terminated before compiling
+    if (runId !== this.runId) return;
+    // Stop can flush output from the old inferior; clear it again afterwards.
     await this.session.stop();
+    if (runId !== this.runId) return;
+    this.session.programOutput = '';
+    this.resettingRunId = null;
+    this.pushSnapshotToWebview();
 
     this.statusBarItem.text = '$(sync~spin) 正在编译 C++ 源码...';
     this.outputChannel.appendLine(`[Dream Compiler] 正在编译: ${sourceFile}`);
@@ -329,6 +352,7 @@ class DreamDebugController {
       compileFlags: this.config.get('compileFlags', ['-g', '-O0', '-std=c++17'])
     });
 
+    if (runId !== this.runId) return;
     this.applyCompilerDiagnostics(sourceFile, compileResult);
 
     if (!compileResult.success) {
@@ -353,7 +377,7 @@ class DreamDebugController {
         sourceFile,
         cwd: path.dirname(sourceFile),
         stdinMode: this.stdinMode,
-        stdin: this.stdinText,
+        stdin: this.stdinMode === 'text' ? this.stdinText : '',
         stdinFile: resolvedStdinFile,
         stopAtMain: this.config.get('stopAtMain', true)
       });
@@ -384,6 +408,17 @@ class DreamDebugController {
       return;
     }
 
+    const runId = ++this.runId;
+    this.resettingRunId = runId;
+    this.quickRunSawStderr = false;
+    this.streamHistory = [];
+    this.session.programOutput = '';
+    this.pushSnapshotToWebview();
+    if (this.activeRunProcess) {
+      try { this.activeRunProcess.kill(); } catch (_) {}
+      this.activeRunProcess = null;
+    }
+
     const openDoc = vscode.workspace.textDocuments.find((d) => d.fileName === sourceFile);
     if (openDoc && openDoc.isDirty) {
       await openDoc.save();
@@ -392,19 +427,19 @@ class DreamDebugController {
     this.sidebarProvider.reveal();
     this.config = vscode.workspace.getConfiguration('dreamCppDebug');
 
+    if (runId !== this.runId) return;
     await this.session.stop();
-    if (this.activeRunProcess && !this.activeRunProcess.killed) {
-      try {
-        this.activeRunProcess.kill();
-      } catch (_) {}
-      this.activeRunProcess = null;
-    }
+    if (runId !== this.runId) return;
+    this.session.programOutput = '';
+    this.resettingRunId = null;
+    this.pushSnapshotToWebview();
 
     const compileResult = await compileSourceFile(sourceFile, {
       compilerPath: this.config.get('compilerPath', 'g++'),
       compileFlags: this.config.get('compileFlags', ['-g', '-O0', '-std=c++17'])
     });
 
+    if (runId !== this.runId) return;
     this.applyCompilerDiagnostics(sourceFile, compileResult);
     if (!compileResult.success) {
       vscode.window.showErrorMessage('C/C++ 编译失败 (CE)，请查看错误提示。');
@@ -423,25 +458,29 @@ class DreamDebugController {
       onProcess: (proc) => {
         this.activeRunProcess = proc;
       },
-      onOutput: (_chunk, stdoutSoFar, stderrSoFar) => {
-        this.session.programOutput = `${stdoutSoFar}${stderrSoFar ? `\n[stderr]\n${stderrSoFar}` : ''}`;
+      onOutput: (chunk, _outputSoFar, category) => {
+        if (runId !== this.runId) return;
+        if (category === 'stderr' && !this.quickRunSawStderr) {
+          this.session.programOutput += '\n[stderr]\n';
+          this.quickRunSawStderr = true;
+        }
+        this.session.programOutput += chunk;
         this.pushSnapshotToWebview();
       }
     });
 
+    if (runId !== this.runId) return;
     this.activeRunProcess = null;
-
-    const summary =
-      `${runRes.stdout}${runRes.stderr ? `\n[stderr]\n${runRes.stderr}` : ''}\n` +
-      `──────────────────────────────\n` +
+    this.session.programOutput +=
+      `\n──────────────────────────────\n` +
       `[运行完毕] 退出码: ${runRes.exitCode} · 耗时: ${runRes.durationMs} ms`;
-
-    this.session.programOutput = summary;
     this.pushSnapshotToWebview();
   }
 
   sendStreamStdin(text) {
     if (typeof text !== 'string' || !text.length) return;
+    const cleanText = text.replace(/\r?\n$/, '');
+    this.streamHistory.push(`→ ${cleanText}`);
     const line = text.endsWith('\n') ? text : `${text}\n`;
     if (this.activeRunProcess && this.activeRunProcess.stdin && !this.activeRunProcess.killed) {
       try {
@@ -449,15 +488,18 @@ class DreamDebugController {
       } catch (_) {}
     }
     this.session.sendStdin(line);
+    this.pushSnapshotToWebview();
   }
 
   closeStreamStdin() {
+    this.streamHistory.push('■ [已发送 EOF]');
     if (this.activeRunProcess && this.activeRunProcess.stdin && !this.activeRunProcess.killed) {
       try {
         this.activeRunProcess.stdin.end();
       } catch (_) {}
     }
     this.session.closeStdin();
+    this.pushSnapshotToWebview();
   }
 
   applyCompilerDiagnostics(sourceFile, compileResult) {
@@ -657,6 +699,15 @@ class DreamDebugController {
         break;
       case 'closeStreamStdin':
         this.closeStreamStdin();
+        break;
+      case 'clearStreamHistory':
+        this.streamHistory = [];
+        this.pushSnapshotToWebview();
+        break;
+      case 'clearProgramOutput':
+        this.quickRunSawStderr = false;
+        this.session.programOutput = '';
+        this.pushSnapshotToWebview();
         break;
       case 'addWatch':
         await this.session.addWatch(msg.expr);

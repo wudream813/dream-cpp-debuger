@@ -101,6 +101,7 @@ class GDBSession extends EventEmitter {
     this.stack = [];
     this.locals = [];
     this.registers = [];
+    this._emitSnapshot();
 
     // Prepare isolated temp directory for this session's stdin & stdout redirection
     const sessionTempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dream-gdb-'));
@@ -1441,6 +1442,7 @@ class GDBSession extends EventEmitter {
 
   getSnapshot() {
     return {
+      sessionId: this.sessionId,
       state: this.state,
       executable: this.executable,
       sourceFile: this.sourceFile,

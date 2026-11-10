@@ -536,6 +536,7 @@ function getSidebarHtml(options = {}) {
 
       let currentStdinMode = 'text';
       let streamHistoryText = '';
+      let lastRunId = -1;
 
       const el = {
         statusDot: document.getElementById('statusDot'),
@@ -624,9 +625,6 @@ function getSidebarHtml(options = {}) {
         const text = el.streamLineInput.value;
         if (!text) return;
         vscode.postMessage({ type: 'sendStreamStdin', text });
-        streamHistoryText += (streamHistoryText ? '\\n' : '') + '→ ' + text;
-        el.streamHistoryBox.textContent = streamHistoryText;
-        el.streamHistoryBox.scrollTop = el.streamHistoryBox.scrollHeight;
         el.streamLineInput.value = '';
       }
 
@@ -637,8 +635,6 @@ function getSidebarHtml(options = {}) {
 
       el.btnSendEof.addEventListener('click', () => {
         vscode.postMessage({ type: 'closeStreamStdin' });
-        streamHistoryText += (streamHistoryText ? '\\n' : '') + '■ [已发送 EOF]';
-        el.streamHistoryBox.textContent = streamHistoryText;
       });
 
       // File input controls
@@ -659,7 +655,9 @@ function getSidebarHtml(options = {}) {
           vscode.postMessage({ type: 'updateStdin', stdin: '' });
         } else if (currentStdinMode === 'stream') {
           streamHistoryText = '';
+          el.streamLineInput.value = '';
           el.streamHistoryBox.textContent = '尚未发送流式输入...';
+          vscode.postMessage({ type: 'clearStreamHistory' });
         } else if (currentStdinMode === 'file') {
           el.stdinFilePathInput.value = '';
           el.filePreviewBox.textContent = '尚未选择输入文件';
@@ -668,7 +666,8 @@ function getSidebarHtml(options = {}) {
       });
 
       el.btnClearStdout.addEventListener('click', () => {
-        el.programOutputBox.textContent = '';
+        el.programOutputBox.textContent = '暂无程序输出';
+        vscode.postMessage({ type: 'clearProgramOutput' });
       });
 
       el.btnCopyStdout.addEventListener('click', () => {
@@ -767,11 +766,32 @@ function getSidebarHtml(options = {}) {
           el.filePreviewBox.textContent = snap.stdinFilePreview;
         }
 
+        if (typeof snap.runId === 'number' && snap.runId !== lastRunId) {
+          lastRunId = snap.runId;
+          streamHistoryText = '';
+          el.streamLineInput.value = '';
+        }
+
+        if (Array.isArray(snap.streamHistory)) {
+          if (snap.streamHistory.length > 0) {
+            streamHistoryText = snap.streamHistory.join('\\n');
+            el.streamHistoryBox.textContent = streamHistoryText;
+            el.streamHistoryBox.scrollTop = el.streamHistoryBox.scrollHeight;
+          } else {
+            streamHistoryText = '';
+            el.streamHistoryBox.textContent =
+              isRunning || isPaused
+                ? '流式通道已就绪，请在上方输入框发送数据...'
+                : '尚未发送流式输入...';
+          }
+        }
+
         if (typeof snap.programOutput === 'string' && snap.programOutput.length > 0) {
           el.programOutputBox.textContent = snap.programOutput;
           el.programOutputBox.scrollTop = el.programOutputBox.scrollHeight;
-        } else if (state === 'starting') {
-          el.programOutputBox.textContent = '等待程序输出...';
+        } else {
+          el.programOutputBox.textContent =
+            isRunning || isPaused ? '等待程序输出...' : '暂无程序输出';
         }
       }
 

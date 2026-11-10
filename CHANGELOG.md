@@ -2,6 +2,16 @@
 
 All notable changes to the **Dream C++ Debugger (GDB)** extension will be documented in this file.
 
+## [1.1.5] - 2026-11-09
+
+### Fixed
+- **修复重新调试时「已发送流式记录」未清空的问题**：
+  - **原因**：原先流式输入记录仅在点击左侧边栏按钮时在前端局部变量中重置；当从右侧调试台点击「重新调试」、或通过顶部工具栏/快捷键重启调试时，前端未收到重置通知。
+  - **修复**：在 `DreamDebugController` 中统一维护 `streamHistory` 并随 `snapshot`（含每次运行递增的 `runId`）同步至前端；每次启动或重新调试（`startDebugSession` / `compileAndQuickRun`）时立即清空 `streamHistory` 与输入框，确保任何入口触发的重新调试都会第一时间清空流式输入记录。
+- **修复重新调试或新会话启动时「程序输出 (stdout / stderr)」残留上次输出的问题**：
+  - **原因**：旧版 `sidebarHtml.js` 的 `renderSnapshot` 仅在 `snap.programOutput.length > 0` 或 `state === 'starting'` 时才更新输出框文本；而新会话启动进入 `paused`（停在 `main()`）或 `running` 且尚未产生新输出时，`snap.programOutput` 为空字符串 `""`，导致 DOM 中一直残留上一次运行的旧输出文本；此外点击「清空」按钮未同步清空后端的 `session.programOutput`。
+  - **修复**：当 `snap.programOutput` 为空字符串时，立即将输出框重置为 `等待程序输出...`（运行/暂停中）或 `暂无程序输出`（空闲/结束），并在点击「清空」按钮时同步清空后端 `session.programOutput`；旧运行的延迟输出不会覆盖新会话。流式调试不再误用文本预设作为初始输入。
+
 ## [1.1.4] - 2026-11-09
 
 ### Fixed
