@@ -9,6 +9,8 @@
 const vscode = require('vscode');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
+const { appendBounded } = require('./src/outputLimits');
 const { GDBSession } = require('./src/gdbSession');
 const { isSourceFile, compileSourceFile, runExecutable } = require('./src/compiler');
 const { getSidebarHtml } = require('./src/sidebarHtml');
@@ -30,11 +32,12 @@ class DreamSidebarProvider {
     };
 
     webviewView.webview.html = getSidebarHtml({
-      nonce: String(Date.now())
+      nonce: crypto.randomBytes(16).toString('base64')
     });
 
     webviewView.webview.onDidReceiveMessage(async (msg) => {
-      await this.controller.handleWebviewMessage(msg);
+      try { await this.controller.handleWebviewMessage(msg); }
+      catch (err) { vscode.window.showErrorMessage(`Dream C++ Debugger: ${err.message}`); }
     });
 
     this.controller.pushSnapshotToWebview();
@@ -71,6 +74,7 @@ class DreamDebugController {
     this.resettingRunId = null;
     this.quickRunSawStderr = false;
     this.activeRunProcess = null;
+    this.activeRunStream = false;
 
     this.lastTargetFile = null;
     this.syncingBreakpoints = false;
@@ -139,11 +143,12 @@ class DreamDebugController {
 
     panel.iconPath = vscode.Uri.joinPath(this.context.extensionUri, 'media', 'activity-icon.svg');
     panel.webview.html = getDashboardHtml({
-      nonce: String(Date.now())
+      nonce: crypto.randomBytes(16).toString('base64')
     });
 
     panel.webview.onDidReceiveMessage(async (msg) => {
-      await this.handleWebviewMessage(msg);
+      try { await this.handleWebviewMessage(msg); }
+      catch (err) { vscode.window.showErrorMessage(`Dream C++ Debugger: ${err.message}`); }
     });
 
     panel.onDidDispose(() => {
@@ -457,48 +462,59 @@ class DreamDebugController {
       timeoutMs: this.stdinMode === 'stream' ? 60000 : 10000,
       onProcess: (proc) => {
         this.activeRunProcess = proc;
+        this.activeRunStream = this.stdinMode === 'stream';
       },
       onOutput: (chunk, _outputSoFar, category) => {
         if (runId !== this.runId) return;
         if (category === 'stderr' && !this.quickRunSawStderr) {
-          this.session.programOutput += '\n[stderr]\n';
+          this.session.programOutput = appendBounded(this.session.programOutput, '\n[stderr]\n');
           this.quickRunSawStderr = true;
         }
-        this.session.programOutput += chunk;
+        this.session.programOutput = appendBounded(this.session.programOutput, chunk);
         this.pushSnapshotToWebview();
       }
     });
 
     if (runId !== this.runId) return;
     this.activeRunProcess = null;
-    this.session.programOutput +=
+    this.session.programOutput = appendBounded(this.session.programOutput,
       `\n──────────────────────────────\n` +
-      `[运行完毕] 退出码: ${runRes.exitCode} · 耗时: ${runRes.durationMs} ms`;
+      `[运行完毕] 退出码: ${runRes.exitCode} · 耗时: ${runRes.durationMs} ms`);
     this.pushSnapshotToWebview();
   }
 
   sendStreamStdin(text) {
     if (typeof text !== 'string' || !text.length) return;
-    const cleanText = text.replace(/\r?\n$/, '');
-    this.streamHistory.push(`→ ${cleanText}`);
     const line = text.endsWith('\n') ? text : `${text}\n`;
-    if (this.activeRunProcess && this.activeRunProcess.stdin && !this.activeRunProcess.killed) {
-      try {
-        this.activeRunProcess.stdin.write(line);
-      } catch (_) {}
+    let sent = false;
+    if (this.activeRunProcess && this.activeRunStream && this.activeRunProcess.stdin?.writable && !this.activeRunProcess.killed) {
+      try { this.activeRunProcess.stdin.write(line); sent = true; } catch (_) {}
+    } else if (!this.activeRunProcess) {
+      sent = this.session.sendStdin(line);
     }
-    this.session.sendStdin(line);
+    if (!sent) {
+      vscode.window.showWarningMessage('当前没有可用的流式输入，请以流式输入模式启动程序。');
+      return;
+    }
+    const cleanText = text.replace(/\r?\n$/, '');
+    this.streamHistory.push(`→ ${cleanText.slice(0, 8192)}`);
+    if (this.streamHistory.length > 1000) this.streamHistory.shift();
     this.pushSnapshotToWebview();
   }
 
   closeStreamStdin() {
-    this.streamHistory.push('■ [已发送 EOF]');
-    if (this.activeRunProcess && this.activeRunProcess.stdin && !this.activeRunProcess.killed) {
-      try {
-        this.activeRunProcess.stdin.end();
-      } catch (_) {}
+    let sent = false;
+    if (this.activeRunProcess && this.activeRunStream && this.activeRunProcess.stdin?.writable && !this.activeRunProcess.killed) {
+      try { this.activeRunProcess.stdin.end(); sent = true; } catch (_) {}
+    } else if (!this.activeRunProcess) {
+      sent = this.session.closeStdin();
     }
-    this.session.closeStdin();
+    if (!sent) {
+      vscode.window.showWarningMessage('当前没有可关闭的流式输入。');
+      return;
+    }
+    this.streamHistory.push('■ [已发送 EOF]');
+    if (this.streamHistory.length > 1000) this.streamHistory.shift();
     this.pushSnapshotToWebview();
   }
 
@@ -821,7 +837,7 @@ function activate(context) {
         try {
           const evaluated = await controller.session.evaluateExpression(expr);
           const md = new vscode.MarkdownString();
-          md.isTrusted = true;
+          md.isTrusted = false;
           md.appendMarkdown(`**Dream GDB 实时求值**\n\n`);
           md.appendCodeblock(`${expr}: ${evaluated.type || 'auto'} = ${evaluated.displayValue}`, 'cpp');
           return new vscode.Hover(md, range);

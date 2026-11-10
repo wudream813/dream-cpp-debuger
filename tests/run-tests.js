@@ -213,6 +213,13 @@ async function runAllTests() {
   assert.ok(titleVar && titleVar.displayValue.includes('Dream C++ GDB Debugger'));
   ok('GDBSession unwrapped std::vector<int> fib, int dp[6], and std::string title');
 
+  // Real GDB regression: reject out-of-bounds edits before writing anything.
+  assert.strictEqual(await session.setVariableValue('fib[7]', '42'), false);
+  assert.strictEqual(await session.setVariableValue('dp[6]', '42'), false);
+  assert.strictEqual(await session.setVariableValue('dp', '{1,2,3,4,5,6,7}'), false);
+  assert.deepStrictEqual(session.locals.find(v => v.name === 'dp').elements, ['1', '2', '4', '8', '16', '32']);
+  ok('Out-of-bounds vector and array writes are rejected');
+
   // Test live variable editing in GDB (scalar, std::string, std::vector element, and C array)
   const editedScalar = await session.setVariableValue('result', '777');
   assert.strictEqual(editedScalar, true);
@@ -533,6 +540,9 @@ int main() {
   assert.ok(dashHtml.includes('GDB 交互命令台 & CPU 寄存器'));
   assert.ok(dashHtml.includes('body.vscode-light'));
   ok('Right Dashboard (getDashboardHtml) renders full spacious GDB inspection workspace');
+
+  await require('./security-tests').testSecurity();
+  ok('Security regression: literal paths/arguments, safe files, bounds and output limits');
 
   await require('./reset-tests').testResets();
   ok('Sidebar and controller reset history/output across restart and ignore late previous-run output');

@@ -10,6 +10,7 @@ const { spawn, execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { appendBounded, MAX_OUTPUT_CHARS } = require('./outputLimits');
 const {
   parseMILine,
   extractStdVectorPointers,
@@ -27,6 +28,20 @@ function cleanCppType(rawType) {
     .replace(/,\s*std::allocator<[^<>]+>\s*/g, '')
     .replace(/\s+>/g, '>')
     .trim();
+}
+
+// GDB invokes a shell to process inferior redirection on Unix. Quote every
+// argument separately; double quotes alone still allow $(...) expansion.
+function quoteInferiorArgument(value) {
+  const text = String(value);
+  if (/[\r\n\0]/.test(text)) throw new Error('参数或路径包含不支持的控制字符');
+  if (process.platform === 'win32') {
+    // cmd.exe expansion/escaping is incompatible with POSIX shell quoting.
+    // Fail closed instead of passing ambiguous shell metacharacters to GDB.
+    if (/["%!^&|<>]/.test(text)) throw new Error('Windows 参数或路径包含不安全的字符');
+    return '"' + text.replace(/\\/g, '/') + '"';
+  }
+  return "'" + text.replace(/'/g, "'\\''") + "'";
 }
 
 class GDBSession extends EventEmitter {
@@ -66,10 +81,13 @@ class GDBSession extends EventEmitter {
     // Temp files & FIFO for inferior stdin/stdout
     this.tempDir = null;
     this.stdinFile = null;
+    this.stdinMode = null;
+    this.stdinClosed = false;
     this.stdinFifoFd = null;
     this.stdoutFile = null;
     this.stdoutReadOffset = 0;
     this.stdoutTimer = null;
+    this._outputLimitReached = false;
     this.programOutput = '';
   }
 
@@ -95,6 +113,7 @@ class GDBSession extends EventEmitter {
     this.programOutput = '';
     this.stdoutBuffer = '';
     this.stdoutReadOffset = 0;
+    this._outputLimitReached = false;
     this.prevLocalValues.clear();
     this.currentFrame = 0;
     this.inferiorPid = null;
@@ -110,6 +129,8 @@ class GDBSession extends EventEmitter {
 
     let sessionStdinTarget = path.join(sessionTempDir, 'stdin.txt');
     const stdinMode = config.stdinMode || 'text';
+    this.stdinMode = stdinMode;
+    this.stdinClosed = false;
 
     if (stdinMode === 'file' && config.stdinFile && fs.existsSync(config.stdinFile)) {
       sessionStdinTarget = path.resolve(config.stdinFile);
@@ -133,6 +154,20 @@ class GDBSession extends EventEmitter {
     this.tempDir = sessionTempDir;
     this.stdinFile = sessionStdinTarget;
     this.stdoutFile = sessionStdoutFile;
+
+    // Validate and quote before spawning, so invalid paths cannot leave a GDB
+    // process or FIFO behind.
+    let redirectArgs;
+    try {
+      const userArgs = Array.isArray(config.args) ? config.args.map(quoteInferiorArgument).join(' ') : '';
+      redirectArgs = `${userArgs} < ${quoteInferiorArgument(sessionStdinTarget)} > ${quoteInferiorArgument(sessionStdoutFile)} 2>&1`.trim();
+    } catch (err) {
+      this.closeStdin();
+      this._cleanupTempFiles(sessionTempDir);
+      this.state = 'error';
+      this.emit('status', { state: 'error', reason: err.message });
+      throw err;
+    }
 
     const gdbArgs = ['--interpreter=mi2', '--quiet', this.executable];
     this.emit('output', {
@@ -238,11 +273,12 @@ class GDBSession extends EventEmitter {
     }
 
     // Configure arguments + stdin/stdout redirection
-    const userArgs = Array.isArray(config.args) ? config.args.join(' ') : '';
-    const escIn = sessionStdinTarget.replace(/\\/g, '/');
-    const escOut = sessionStdoutFile.replace(/\\/g, '/');
-    const redirectArgs = `${userArgs} < "${escIn}" > "${escOut}" 2>&1`.trim();
-    await this.sendCommand(`-exec-arguments ${redirectArgs}`).catch(() => {});
+    try {
+      await this.sendCommand(`-exec-arguments ${redirectArgs}`);
+    } catch (err) {
+      await this.stop();
+      throw err;
+    }
 
     // Start execution
     this.state = 'running';
@@ -256,6 +292,7 @@ class GDBSession extends EventEmitter {
    */
   sendCommand(command, timeoutMs = 8000) {
     return new Promise((resolve, reject) => {
+      if (/[\r\n\0]/.test(command)) return reject(new Error('GDB 命令不能包含换行或空字符'));
       if (!this.proc || !this.proc.stdin || !this.proc.stdin.writable) {
         return reject(new Error('GDB 未运行'));
       }
@@ -508,7 +545,7 @@ class GDBSession extends EventEmitter {
    * Stream a line or chunk of standard input (stdin) into the running/paused inferior process.
    */
   sendStdin(text) {
-    if (typeof text !== 'string' || !text.length) return false;
+    if (this.stdinMode !== 'stream' || this.stdinClosed || typeof text !== 'string' || !text.length) return false;
     const payload = text.endsWith('\n') ? text : `${text}\n`;
     try {
       if (this.stdinFifoFd !== null) {
@@ -529,13 +566,15 @@ class GDBSession extends EventEmitter {
    * Send EOF to the streaming stdin pipe.
    */
   closeStdin() {
+    const wasOpenStream = this.stdinMode === 'stream' && !this.stdinClosed;
+    this.stdinClosed = true;
     if (this.stdinFifoFd !== null) {
       try {
         fs.closeSync(this.stdinFifoFd);
       } catch (_) {}
       this.stdinFifoFd = null;
       setTimeout(() => this._pollProgramOutput(), 80);
-      return true;
+      return wasOpenStream;
     }
     return false;
   }
@@ -766,6 +805,18 @@ class GDBSession extends EventEmitter {
     this._emitSnapshot();
   }
 
+  async _getContainerLength(name, isVector) {
+    // Only simple local names are admitted into these GDB expressions.
+    if (!/^[a-zA-Z_]\w*$/.test(name)) throw new Error('无法验证数组边界');
+    const expression = isVector
+      ? `(long long)(${name}._M_impl._M_finish - ${name}._M_impl._M_start)`
+      : `(unsigned long)(sizeof(${name}) / sizeof(${name}[0]))`;
+    const result = await this.sendCommand(`-data-evaluate-expression "${expression}"`);
+    const text = String(result?.results?.value ?? '').trim();
+    if (!/^\d+$/.test(text) || !Number.isSafeInteger(Number(text))) throw new Error('无法验证数组边界');
+    return Number(text);
+  }
+
   /**
    * Modify a local variable, std::string, std::vector, array, or element value during pause.
    */
@@ -791,15 +842,20 @@ class GDBSession extends EventEmitter {
         const baseName = idxMatch[1];
         const elemIdx = parseInt(idxMatch[2], 10);
         const baseVar = this.locals.find((v) => v.name === baseName);
-        if (baseVar && (baseVar.type.includes('vector') || (baseVar.raw && baseVar.raw.includes('_M_impl')))) {
-          const vecAssign = `*(${baseName}._M_impl._M_start + ${elemIdx}) = ${rawInput}`;
-          await this.sendCommand(`-data-evaluate-expression "${escapeForMI(vecAssign)}"`);
-          await this.refreshState();
-          return true;
-        }
+        if (!baseVar || baseVar.kind !== 'array') throw new Error('无法验证数组边界');
+        const isVec = baseVar.type.includes('vector') || (baseVar.raw && baseVar.raw.includes('_M_impl'));
+        const length = await this._getContainerLength(baseName, isVec);
+        if (!Number.isSafeInteger(elemIdx) || elemIdx >= length) throw new Error(`数组索引越界（长度 ${length}）`);
+        const assignment = isVec
+          ? `*(${baseName}._M_impl._M_start + ${elemIdx}) = ${rawInput}`
+          : `${baseName}[${elemIdx}] = ${rawInput}`;
+        await this.sendCommand(`-data-evaluate-expression "${escapeForMI(assignment)}"`);
+        await this.refreshState();
+        return true;
       }
 
       const targetVar = this.locals.find((v) => v.name === cleanName);
+      if (targetVar?.kind === 'uninitialized') throw new Error('变量尚未初始化');
       const isStdString =
         targetVar &&
         (targetVar.type.includes('string') ||
@@ -821,7 +877,14 @@ class GDBSession extends EventEmitter {
           const assignExpr = `${cleanName}.assign(${cLiteral}, ${byteLen})`;
           await this.sendCommand(`-data-evaluate-expression "${escapeForMI(assignExpr)}"`);
         } catch (_) {
-          // Fallback: direct buffer copy into _M_dataplus._M_p if .assign symbol is unavailable
+          // Only fall back to raw libstdc++ storage if its actual capacity can
+          // be determined. Never copy past it or guess another STL's layout.
+          const capExpr = `(unsigned long)(${cleanName}._M_dataplus._M_p == ${cleanName}._M_local_buf ? sizeof(${cleanName}._M_local_buf) - 1 : ${cleanName}._M_allocated_capacity)`;
+          const capResult = await this.sendCommand(`-data-evaluate-expression "${escapeForMI(capExpr)}"`);
+          const capacityText = String(capResult?.results?.value ?? '').trim();
+          if (!/^\d+$/.test(capacityText) || !Number.isSafeInteger(Number(capacityText)) || byteLen > Number(capacityText)) {
+            throw new Error('无法安全修改字符串：目标容量不足或无法确认');
+          }
           const memcpyExpr = `(void*)memcpy(${cleanName}._M_dataplus._M_p, ${cLiteral}, ${byteLen + 1})`;
           await this.sendCommand(`-data-evaluate-expression "${escapeForMI(memcpyExpr)}"`);
           await this.sendCommand(
@@ -844,6 +907,8 @@ class GDBSession extends EventEmitter {
           ? stripped.split(',').map((s) => s.trim()).filter(Boolean)
           : [];
         const isVec = targetVar.type.includes('vector') || (targetVar.raw && targetVar.raw.includes('_M_impl'));
+        const length = await this._getContainerLength(cleanName, isVec);
+        if (parts.length > length) throw new Error(`赋值元素过多（长度 ${length}）`);
         for (let i = 0; i < parts.length; i++) {
           const elemAssign = isVec
             ? `*(${cleanName}._M_impl._M_start + ${i}) = ${parts[i]}`
@@ -1209,6 +1274,11 @@ class GDBSession extends EventEmitter {
 
   _onStdoutData(chunk) {
     this.stdoutBuffer += chunk.toString();
+    if (this.stdoutBuffer.length > MAX_OUTPUT_CHARS * 2 && !this.stdoutBuffer.includes('\n')) {
+      this.stdoutBuffer = '';
+      this.emit('output', { category: 'system', text: '[GDB] MI 输出过长，已丢弃该片段' });
+      return;
+    }
     let newlineIdx;
     while ((newlineIdx = this.stdoutBuffer.indexOf('\n')) !== -1) {
       const line = this.stdoutBuffer.slice(0, newlineIdx);
@@ -1230,7 +1300,7 @@ class GDBSession extends EventEmitter {
 
     if (record.type === 'target') {
       if (record.content) {
-        this.programOutput += record.content;
+        this.programOutput = appendBounded(this.programOutput, record.content);
         this.emit('output', { category: 'stdout', text: record.content });
         this._emitSnapshot();
       }
@@ -1411,17 +1481,37 @@ class GDBSession extends EventEmitter {
     if (!this.stdoutFile || !fs.existsSync(this.stdoutFile)) return;
     try {
       const stat = fs.statSync(this.stdoutFile);
+      // Limit each read, and skip excessively large backlogs rather than
+      // allocating a buffer proportional to an untrusted program's output.
+      if (stat.size - this.stdoutReadOffset > MAX_OUTPUT_CHARS) {
+        this.stdoutReadOffset = stat.size - MAX_OUTPUT_CHARS;
+        this.programOutput = appendBounded(this.programOutput, '\n[输出过多，部分内容已截断]\n');
+      }
       if (stat.size > this.stdoutReadOffset) {
         const fd = fs.openSync(this.stdoutFile, 'r');
-        const len = stat.size - this.stdoutReadOffset;
-        const buf = Buffer.alloc(len);
-        fs.readSync(fd, buf, 0, len, this.stdoutReadOffset);
-        fs.closeSync(fd);
-        this.stdoutReadOffset = stat.size;
-        const chunk = buf.toString('utf8');
-        this.programOutput += chunk;
-        this.emit('output', { category: 'stdout', text: chunk });
+        let text = '';
+        try {
+          while (stat.size > this.stdoutReadOffset) {
+            const len = Math.min(stat.size - this.stdoutReadOffset, 65536);
+            const buf = Buffer.alloc(len);
+            const count = fs.readSync(fd, buf, 0, len, this.stdoutReadOffset);
+            if (!count) break;
+            this.stdoutReadOffset += count;
+            text = appendBounded(text, buf.subarray(0, count).toString('utf8'));
+          }
+        } finally { fs.closeSync(fd); }
+        this.programOutput = appendBounded(this.programOutput, text);
+        this.emit('output', { category: 'stdout', text });
         this._emitSnapshot();
+      }
+      // Polling cannot be a hard disk quota, but stops runaway debug sessions.
+      if (stat.size > 32 * 1024 * 1024 && !this._outputLimitReached && this.proc) {
+        this._outputLimitReached = true;
+        const warning = '[Dream GDB] 程序输出超过 32 MiB，已停止调试以保护磁盘空间。';
+        this.programOutput = appendBounded(this.programOutput, `\n${warning}\n`);
+        this.emit('output', { category: 'system', text: warning });
+        this._emitSnapshot();
+        void this.stop();
       }
     } catch (_) {}
   }
@@ -1434,8 +1524,10 @@ class GDBSession extends EventEmitter {
       } catch (_) {}
     }
     if (!targetDir || targetDir === this.tempDir) {
+      this.closeStdin();
       this.tempDir = null;
       this.stdinFile = null;
+      this.stdinMode = null;
       this.stdoutFile = null;
     }
   }

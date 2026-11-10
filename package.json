@@ -2,7 +2,7 @@
   "name": "dream-cpp-debuger",
   "displayName": "Dream C++ Debugger (GDB)",
   "description": "现代简洁的 C/C++ GDB 调试器扩展 —— 零配置一键编译调试、现代化侧边栏面板、STL/数组可视化、条件断点、标准输入(stdin)注入与行内变量实时预览。",
-  "version": "1.1.5",
+  "version": "1.1.6",
   "publisher": "wudream",
   "author": {
     "name": "wudream813"
@@ -392,6 +392,18 @@
   },
   "license": "MIT",
   "devDependencies": {
-    "@vscode/vsce": "^3.0.0"
+    "@vscode/vsce": "3.9.2"
+  },
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "编译、运行程序和 GDB 会执行本机代码，请只在受信任的工作区使用。"
+    }
+  },
+  "overrides": {
+    "@azure/identity": "4.12.0",
+    "glob": "14.0.4",
+    "minimatch": "11.0.5",
+    "uuid": "11.1.1"
   }
 }

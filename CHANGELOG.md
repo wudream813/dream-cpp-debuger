@@ -2,6 +2,16 @@
 
 All notable changes to the **Dream C++ Debugger (GDB)** extension will be documented in this file.
 
+## [1.1.6] - 2026-11-09
+
+### Security and reliability
+- 使用 shell 安全引用逐个处理 GDB 程序参数与输入/输出路径，并拒绝控制字符；Windows 路径/参数包含不安全的 cmd 字符时拒绝启动。
+- 编译输出写入独立目录，不再按前缀删除已有文件；流式输入仅写入当前流式会话，不修改选定的输入文件。
+- 修改数组、vector 元素之前校验实际长度；std::string 赋值回退在无法确认容量或容量不足时安全失败，不再执行无界复制。
+- 限制内存中的输出和 GDB 控制台记录；GDB 重定向文件超过 32 MiB 时轮询发现后停止会话。轮询阈值并非操作系统级硬配额。
+- 添加 Webview CSP、随机 nonce，禁用悬停 Markdown 的可信命令，并要求 VS Code 工作区可信。
+- 锁定和审计开发依赖，补充安全回归测试。
+
 ## [1.1.5] - 2026-11-09
 
 ### Fixed

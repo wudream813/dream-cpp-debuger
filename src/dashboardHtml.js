@@ -6,12 +6,13 @@
 'use strict';
 
 function getDashboardHtml(options = {}) {
-  const nonce = options.nonce || 'dream-dashboard-nonce';
+  const nonce = options.nonce || require('crypto').randomBytes(16).toString('base64');
 
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; connect-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'nonce-${nonce}'" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Dream C++ GDB 调试台</title>
   <style nonce="${nonce}">
@@ -1022,7 +1023,7 @@ function getDashboardHtml(options = {}) {
         if (msg.type === 'snapshot') {
           renderSnapshot(msg.snapshot);
         } else if (msg.type === 'consoleOutput') {
-          el.gdbConsoleBox.textContent += '\\n' + msg.text;
+          el.gdbConsoleBox.textContent = (el.gdbConsoleBox.textContent + '\\n' + msg.text).slice(-1048576);
           el.gdbConsoleBox.scrollTop = el.gdbConsoleBox.scrollHeight;
         }
       });

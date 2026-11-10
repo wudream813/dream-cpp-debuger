@@ -15,12 +15,12 @@
 
 ### 1. 零配置一键编译 & GDB 调试
 告别繁琐易错的 `launch.json` 与 `tasks.json` 配置。只需打开任意 `.cpp` / `.c` 源文件：
-- 点击编辑器右上角 **`▶ 编译并开始 GDB 调试`** 按钮，或直接点击 `int main()` 上方的 **`GDB 调试 (Dream Debugger)`** CodeLens。
+- 点击编辑器右上角或左侧面板的 **`编译并开始 GDB 调试`** 按钮。
 - 自动调用 `g++ -g -O0`（可自定义编译器和参数）生成带调试符号的程序，并在后台通过 **`gdb --interpreter=mi2`** 启动调试会话。
 - 编译出错时自动解析 GCC/Clang 报错行号，同步展示在侧边栏卡片与 VS Code 原生 **问题 (Problems)** 面板中，点击即可跳转对应代码行。
 
-### 2. 现代简洁侧边栏调试工作台
-点击 VS Code 左侧活动栏（Activity Bar）中的 **Dream C++ Debugger** 图标，即可打开专为 C/C++ 与算法调试设计的现代化侧边栏面板：
+### 2. 侧边栏输入输出与右侧调试台
+点击活动栏中的 **Dream C++ Debugger** 图标使用编译、输入输出；开始调试后会自动在右侧打开调试台：
 - **状态头与单步传输控制栏**：清晰展示当前调试状态（`就绪 Ready` / `运行中 Running` / `已暂停 Paused` / `已结束 Exited`），配备 **继续 (`F5`)**、**单步跳过 (`F10`)**、**单步进入 (`F11`)**、**单步跳出 (`Shift+F11`)**、**重启** 与 **停止 (`Shift+F5`)** 快捷按钮。
 - **局部变量 & STL/数组可视化**：
   - 自动解包原生 `std::vector`、`std::string` 与 C/C++ 数组（即使系统未配置 GDB Python Pretty-Printer 也能完美读取底层 `_M_start` / `_M_finish` 与 `_M_dataplus`）。
@@ -32,7 +32,7 @@
 - **调用栈 (`Call Stack`) 与条件断点管理**：
   - 实时展示递归或函数调用链（`#0`, `#1`, ...），点击任意栈帧立即切换上下文并跳转到对应源码行。
   - 与 VS Code 编辑器行号左侧红点断点双向同步，支持开关断点、查看命中次数（`×N`）以及设置 **条件断点**（如 `i == 5 && sum > 20`）。
-- **交互式 GDB 命令台 & CPU 寄存器面板**：支持在侧边栏直接执行原生 GDB 命令（如 `p x`、`x/8xw &arr`、`info locals`、`bt`），并实时展示通用 CPU 寄存器（`rax`, `rbx`, `rsp`, `rip` 等）。
+- **交互式 GDB 命令台 & CPU 寄存器面板**：支持在右侧调试台直接执行原生 GDB 命令（如 `p x`、`x/8xw &arr`、`info locals`、`bt`），并实时展示通用 CPU 寄存器（`rax`, `rbx`, `rsp`, `rip` 等）。
 
 ### 3. 编辑器深度增强
 - **当前执行行高亮与箭头指示**：暂停时以柔和琥珀色高亮当前执行行，并在行尾内联显示当前作用域主要变量的实时值（如 `// i = 3 │ total = 7 │ n = 5`）。
@@ -61,11 +61,10 @@
 | :--- | :--- | :--- | :--- |
 | `dreamCppDebug.gdbPath` | `string` | `"gdb"` | GDB 可执行文件路径（如 `gdb` 或 `C:\mingw64\bin\gdb.exe`） |
 | `dreamCppDebug.compilerPath` | `string` | `"g++"` | C++ 编译器可执行文件路径（`.c` 文件会自动回退到 `gcc`） |
-| `dreamCppDebug.compileFlags` | `array` | `["-g", "-O0", "-Wall", "-std=c++17"]` | 编译参数（自动确保包含 `-g` 调试符号） |
+| `dreamCppDebug.compileFlags` | `array` | `["-g", "-O0", "-std=c++17"]` | 编译参数（自动确保包含 `-g` 调试符号） |
 | `dreamCppDebug.stopAtMain` | `boolean` | `true` | 启动调试后是否默认在 `main` 函数入口处自动暂停 |
 | `dreamCppDebug.showInlineValues` | `boolean` | `true` | 在编辑器当前暂停行尾内联展示局部变量实时值 |
 | `dreamCppDebug.enableHoverEval` | `boolean` | `true` | 调试暂停时将鼠标悬停在代码变量上自动通过 GDB 求值 |
-| `dreamCppDebug.enableCodeLens` | `boolean` | `true` | 在 `main` 函数上方显示一键调试与运行 CodeLens |
 | `dreamCppDebug.maxArrayPreview` | `number` | `16` | 侧边栏数组与 `std::vector` 可视化条带默认预览的最大元素数 |
 
 ---
@@ -77,6 +76,14 @@
    - **Windows**：安装 [MinGW-w64 / MSYS2](https://www.msys2.org/) 并确保 `g++.exe` 与 `gdb.exe` 所在 `bin` 目录位于 `PATH` 中。
    - **macOS**：安装带签名配置的 GDB 或在设置中指定 `gdbPath`。
 2. 在 VS Code 中加载本扩展目录（按 `F5` 启动扩展开发宿主），或通过 `.vsix` 安装包离线安装。
+
+## 安全与输出限制
+
+- 扩展需要受信任的工作区。编译器、GDB、监视表达式和被调试程序会以当前用户权限运行；本扩展不是沙箱，不要在本机执行不可信的代码或 GDB 命令。
+- 内存中保留的输出限制为约 1 Mi 字符，超出时保留较新的内容并显示截断提示。GDB 输出重定向文件超过 32 MiB 时会在轮询发现后停止调试；由于存在轮询延迟，这不是硬性磁盘配额。请使用操作系统级隔离和资源限制运行不可信程序。
+- 每次编译生成独立的 `.dream-debug/build-*` 目录，不自动删除已有构建；确认不再需要时可手动清理该目录。
+- 当无法确认字符串容量或数组大小时，修改操作会安全失败；过长的字符串赋值在 GDB 的正常 `assign` 不可用时可能被拒绝。
+- Windows 下包含 `" % ! ^ & | < >` 的 GDB 输入文件路径或程序参数会被拒绝，避免有歧义的命令行解析。
 
 ## 🧪 运行测试
 

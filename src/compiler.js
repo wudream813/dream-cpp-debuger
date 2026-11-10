@@ -9,6 +9,7 @@ const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const { appendBounded } = require('./outputLimits');
 
 const SOURCE_EXTS = new Set(['.cpp', '.cc', '.cxx', '.c++', '.c']);
 const DIAG_REGEX = /^(.+?):(\d+):(?:(\d+):)?\s*(fatal error|error|warning|note|致命错误|错误|警告|附注):\s*(.+)$/i;
@@ -58,7 +59,6 @@ function compileSourceFile(sourceFile, options = {}) {
     const absSource = path.resolve(sourceFile);
     const sourceDir = path.dirname(absSource);
     const ext = path.extname(absSource).toLowerCase();
-    const baseName = path.basename(absSource, ext);
 
     let compiler = options.compilerPath || 'g++';
     if (ext === '.c' && compiler === 'g++') {
@@ -78,34 +78,19 @@ function compileSourceFile(sourceFile, options = {}) {
       flags.unshift('-g');
     }
 
-    let outDir = path.join(sourceDir, '.dream-debug');
+    // Each build gets a private, unique directory; never delete or overwrite
+    // another file merely because it shares a source-name prefix.
+    let outDir;
     try {
-      fs.mkdirSync(outDir, { recursive: true });
+      const root = path.join(sourceDir, '.dream-debug');
+      fs.mkdirSync(root, { recursive: true });
+      outDir = fs.mkdtempSync(path.join(root, 'build-'));
     } catch (_) {
-      outDir = path.join(os.tmpdir(), 'dream-cpp-debug');
-      fs.mkdirSync(outDir, { recursive: true });
+      outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dream-build-'));
     }
 
     const extSuffix = process.platform === 'win32' ? '.exe' : '.debug.out';
-    let outputBinary = options.outputBinary || path.join(outDir, `${baseName}${extSuffix}`);
-
-    // Clean up old binaries in outDir when possible; if default binary is still locked by OS, use a fresh filename
-    try {
-      for (const f of fs.readdirSync(outDir)) {
-        if (f.startsWith(baseName) && (f.endsWith('.exe') || f.endsWith('.debug.out'))) {
-          try { fs.unlinkSync(path.join(outDir, f)); } catch (_) {}
-        }
-      }
-    } catch (_) {}
-
-    if (fs.existsSync(outputBinary)) {
-      try {
-        fs.unlinkSync(outputBinary);
-      } catch (_) {
-        // File is still locked by OS (common on Windows right after GDB exits); use unique binary path
-        outputBinary = path.join(outDir, `${baseName}_${Date.now()}${extSuffix}`);
-      }
-    }
+    const outputBinary = path.join(outDir, `program${extSuffix}`);
 
     const args = [...flags, absSource, '-o', outputBinary];
     const commandLine = `${compiler} ${args.map((a) => (a.includes(' ') ? `"${a}"` : a)).join(' ')}`;
@@ -145,8 +130,8 @@ function compileSourceFile(sourceFile, options = {}) {
       });
     }
 
-    proc.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
-    proc.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+    proc.stdout.on('data', (chunk) => { stdout = appendBounded(stdout, chunk.toString()); });
+    proc.stderr.on('data', (chunk) => { stderr = appendBounded(stderr, chunk.toString()); });
 
     proc.on('error', (err) => {
       const errItem = {
@@ -219,7 +204,7 @@ function runExecutable(executablePath, options = {}) {
 
     proc.stdout.on('data', (chunk) => {
       const text = chunk.toString();
-      stdout += text;
+      stdout = appendBounded(stdout, text);
       if (typeof options.onOutput === 'function') {
         options.onOutput(text, stdout, 'stdout');
       }
@@ -227,12 +212,13 @@ function runExecutable(executablePath, options = {}) {
 
     proc.stderr.on('data', (chunk) => {
       const text = chunk.toString();
-      stderr += text;
+      stderr = appendBounded(stderr, text);
       if (typeof options.onOutput === 'function') {
         options.onOutput(text, stdout + (stderr ? `\n[stderr]\n${stderr}` : ''), 'stderr');
       }
     });
 
+    proc.stdin.on('error', () => {}); // EPIPE when the inferior exits before consuming input
     if (options.stdinFile && fs.existsSync(options.stdinFile)) {
       const fileStream = fs.createReadStream(options.stdinFile);
       fileStream.on('error', () => {
