@@ -292,7 +292,6 @@ async function runAllTests() {
   const thirdExit = await thirdExitPromise;
   assert.strictEqual(thirdExit.state, 'exited');
   await session.stop();
-  fs.rmSync(path.join(__dirname, '..', 'examples', '.dream-debug'), { recursive: true, force: true });
   ok('GDBSession 3rd consecutive start() (mid-session restart) succeeded and exited cleanly');
 
   console.log('\n=== 4. Dual-Pane UI Verification (Left Sidebar I/O + Right Dashboard) ===');
@@ -422,6 +421,90 @@ int main() {
     }
 
     fs.rmSync(tmpStreamDir, { recursive: true, force: true });
+  }
+
+  // Test 5: StepInto followed by StepOut (both in main() outermost frame, STL lines, and user functions)
+  // never leaves session.state stuck in 'running' or makes buttons unresponsive
+  {
+    const stepSession = new GDBSession({ gdbPath: 'gdb' });
+    const waitStepStop = () =>
+      new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(`Step timeout! state=${stepSession.state}`)), 6000);
+        const onStat = (ev) => {
+          if (ev.state === 'paused' || ev.state === 'exited') {
+            clearTimeout(timer);
+            stepSession.off('status', onStat);
+            resolve(ev);
+          }
+        };
+        stepSession.on('status', onStat);
+      });
+
+    let p = waitStepStop();
+    await stepSession.start({
+      executable: compileRes.executable,
+      sourceFile: demoSource,
+      stdin: '5\n',
+      stopAtMain: true
+    });
+    await p;
+    assert.strictEqual(stepSession.state, 'paused');
+
+    // 1) StepInto at main entry (line 17 -> 18), then StepOut while still in main() outermost frame
+    p = waitStepStop();
+    await stepSession.stepInto();
+    await p;
+    assert.strictEqual(stepSession.state, 'paused');
+
+    p = waitStepStop();
+    await stepSession.stepOut();
+    await p;
+    assert.strictEqual(stepSession.state, 'paused');
+    assert.strictEqual(stepSession.stopLocation.func, 'main');
+
+    // 2) StepInto on std::string (line 22), std::array (line 23), std::vector (line 24) skips internal STL headers cleanly
+    p = waitStepStop();
+    await stepSession.stepInto();
+    await p;
+    assert.strictEqual(stepSession.stopLocation.line, 23);
+
+    p = waitStepStop();
+    await stepSession.stepInto();
+    await p;
+    assert.strictEqual(stepSession.stopLocation.line, 24);
+
+    p = waitStepStop();
+    await stepSession.stepInto();
+    await p;
+    assert.strictEqual(stepSession.stopLocation.line, 26);
+
+    // 3) StepInto into computePrefixSum (line 9), then StepOut back to main (line 26), then StepOut/StepOver/Continue
+    p = waitStepStop();
+    await stepSession.stepInto();
+    await p;
+    assert.strictEqual(stepSession.stopLocation.func, 'computePrefixSum');
+
+    p = waitStepStop();
+    await stepSession.stepOut();
+    await p;
+    assert.strictEqual(stepSession.state, 'paused');
+    assert.strictEqual(stepSession.stopLocation.func, 'main');
+
+    // Clicking StepOut again while back in main() must NOT lock state to 'running'
+    p = waitStepStop();
+    await stepSession.stepOut();
+    await p;
+    assert.strictEqual(stepSession.state, 'paused');
+    assert.strictEqual(stepSession.stopLocation.line, 27);
+
+    // Finally Continue to completion
+    p = waitStepStop();
+    await stepSession.continue();
+    const endEv = await p;
+    assert.strictEqual(endEv.state, 'exited');
+    await stepSession.stop();
+    fs.rmSync(path.join(__dirname, '..', 'examples', '.dream-debug'), { recursive: true, force: true });
+    ok('StepInto + StepOut across main(), STL constructors, and user functions keeps all step/continue buttons responsive');
   }
 
   const dashHtml = getDashboardHtml({ nonce: 'test-nonce' });

@@ -50,6 +50,10 @@ class GDBSession extends EventEmitter {
     this.currentThread = 1;
     this.stopLocation = null; // { file, line, func, addr, reason }
     this.inferiorPid = null;
+    this._refreshPromise = null;
+    this._lastStepOrigin = null;
+    this._lastStepMode = null;
+    this._autoSkipDepth = 0;
 
     // State caches for sidebar snapshot
     this.stack = [];
@@ -85,7 +89,8 @@ class GDBSession extends EventEmitter {
     const currentSessionId = ++this.sessionId;
     this.executable = config.executable;
     this.sourceFile = config.sourceFile || null;
-    this.cwd = config.cwd || (this.executable ? path.dirname(this.executable) : process.cwd());
+    const rawCwd = config.cwd || (this.executable ? path.dirname(this.executable) : process.cwd());
+    this.cwd = rawCwd && fs.existsSync(rawCwd) ? rawCwd : process.cwd();
     this.state = 'starting';
     this.programOutput = '';
     this.stdoutBuffer = '';
@@ -215,6 +220,9 @@ class GDBSession extends EventEmitter {
     await this.sendCommand('-gdb-set print repeats 32').catch(() => {});
     await this.sendCommand('-gdb-set pagination off').catch(() => {});
     await this.sendCommand('-gdb-set confirm off').catch(() => {});
+    // Skip C++ STL / libstdc++ internal functions when stepping into user code
+    await this.sendCommand('-interpreter-exec console "skip -rfu ^std::"').catch(() => {});
+    await this.sendCommand('-interpreter-exec console "skip -rfu ^__gnu_cxx::"').catch(() => {});
 
     if (spawnError || this.proc !== proc) {
       throw new Error(`未找到或无法启动 GDB (${this.gdbPath})，请确认系统已安装 GDB 并加入 PATH`);
@@ -286,30 +294,192 @@ class GDBSession extends EventEmitter {
 
   // ── Execution Control ──
 
+  _isSystemLibraryFrame(frame) {
+    if (!frame) return false;
+    const file = String(frame.fullname || frame.file || '').replace(/\\/g, '/');
+    const func = String(frame.func || '');
+    if (
+      func.startsWith('std::') ||
+      func.startsWith('__gnu_cxx::') ||
+      func.startsWith('__cxx11::') ||
+      func.startsWith('_GLOBAL__sub_I_')
+    ) {
+      return true;
+    }
+    if (
+      file.includes('/include/c++/') ||
+      file.includes('/bits/') ||
+      file.includes('/ext/') ||
+      file.includes('/lib/gcc/')
+    ) {
+      return true;
+    }
+    return false;
+  }
+
+  _isCrtOrUnknownExitFrame(frame) {
+    if (!frame) return false;
+    const func = String(frame.func || '');
+    const file = String(frame.fullname || frame.file || '').replace(/\\/g, '/');
+    if (
+      func === '??' ||
+      func === '_start' ||
+      func.includes('libc_start') ||
+      func.includes('CRTStartup') ||
+      func.includes('__tmain') ||
+      file.includes('libc-start') ||
+      file.includes('libc_start') ||
+      file.includes('crt0') ||
+      file.includes('crtexe')
+    ) {
+      return true;
+    }
+    return false;
+  }
+
+  async _waitPendingRefresh() {
+    if (this._refreshPromise) {
+      try {
+        await this._refreshPromise;
+      } catch (_) {}
+    }
+  }
+
+  _restorePausedStateOnError(err) {
+    this._lastStepOrigin = null;
+    this._lastStepMode = null;
+    this._autoSkipDepth = 0;
+    if (this.proc) {
+      this.state = 'paused';
+      this.emit('status', {
+        state: 'paused',
+        reason: 'command-error',
+        location: this.stopLocation
+      });
+      this._emitSnapshot();
+    }
+    if (err && err.message) {
+      this.emit('output', {
+        category: 'system',
+        text: `[Dream GDB] 单步/执行提示: ${err.message}`
+      });
+    }
+  }
+
   async continue() {
+    await this._waitPendingRefresh();
     if (this.state !== 'paused') return;
+    this._lastStepOrigin = null;
+    this._lastStepMode = null;
+    this._autoSkipDepth = 0;
     this.state = 'running';
     this.emit('status', { state: 'running', reason: 'continue' });
     this._emitSnapshot();
-    await this.sendCommand('-exec-continue');
+    try {
+      await this.sendCommand('-exec-continue');
+    } catch (err) {
+      this._restorePausedStateOnError(err);
+    }
   }
 
   async stepOver() {
+    await this._waitPendingRefresh();
     if (this.state !== 'paused') return;
+    this._lastStepOrigin = this.stopLocation
+      ? { func: this.stopLocation.func, line: this.stopLocation.line, file: this.stopLocation.file }
+      : null;
+    this._lastStepMode = 'stepOver';
+    this._autoSkipDepth = 0;
     this.state = 'running';
-    await this.sendCommand('-exec-next');
+    try {
+      await this.sendCommand('-exec-next');
+    } catch (err) {
+      const msg = String(err && err.message ? err.message : '');
+      if (msg.includes('Cannot find bounds of current function')) {
+        try {
+          await this.sendCommand('-exec-continue');
+          return;
+        } catch (_) {}
+      }
+      this._restorePausedStateOnError(err);
+    }
   }
 
   async stepInto() {
+    await this._waitPendingRefresh();
     if (this.state !== 'paused') return;
+    this._lastStepOrigin = this.stopLocation
+      ? { func: this.stopLocation.func, line: this.stopLocation.line, file: this.stopLocation.file }
+      : null;
+    this._lastStepMode = 'stepInto';
+    this._autoSkipDepth = 0;
     this.state = 'running';
-    await this.sendCommand('-exec-step');
+    try {
+      await this.sendCommand('-exec-step');
+    } catch (err) {
+      const msg = String(err && err.message ? err.message : '');
+      if (msg.includes('Cannot find bounds of current function')) {
+        try {
+          await this.sendCommand('-exec-continue');
+          return;
+        } catch (_) {}
+      }
+      this._restorePausedStateOnError(err);
+    }
   }
 
   async stepOut() {
+    await this._waitPendingRefresh();
     if (this.state !== 'paused') return;
+
+    // Ensure frame #0 is selected before executing -exec-finish
+    if (this.currentFrame !== 0) {
+      this.currentFrame = 0;
+      await this.sendCommand('-stack-select-frame 0').catch(() => {});
+    }
+
+    // If already in main() (or there is no user caller frame below frame #0),
+    // do NOT execute -exec-finish (which either throws `"finish" not meaningful in the outermost frame.`
+    // and locks up state, or steps out of main() into CRT/glibc startup stub `??`).
+    const topFunc = this.stopLocation?.func || this.stack[0]?.func || '';
+    const hasMainCallerBelow = this.stack.slice(1).some((f) => f && f.func === 'main');
+    if (topFunc === 'main' || (!hasMainCallerBelow && this.stack.length <= 1)) {
+      this.emit('output', {
+        category: 'system',
+        text: '[Dream GDB] 当前已处于 main() 最外层函数栈帧，「跳出 (Step Out)」已自动转为「单步跳过 (Step Over)」'
+      });
+      return this.stepOver();
+    }
+
+    this._lastStepOrigin = this.stopLocation
+      ? { func: this.stopLocation.func, line: this.stopLocation.line, file: this.stopLocation.file }
+      : null;
+    this._lastStepMode = 'stepOut';
+    this._autoSkipDepth = 0;
     this.state = 'running';
-    await this.sendCommand('-exec-finish');
+    try {
+      await this.sendCommand('-exec-finish');
+    } catch (err) {
+      const msg = String(err && err.message ? err.message : '');
+      if (
+        msg.includes('outermost frame') ||
+        msg.includes('not meaningful') ||
+        msg.includes('Cannot find bounds')
+      ) {
+        try {
+          this.emit('output', {
+            category: 'system',
+            text: '[Dream GDB] 当前已处于最外层栈帧，「跳出 (Step Out)」已自动转为「单步跳过 (Step Over)」'
+          });
+          await this.sendCommand('-exec-next');
+          return;
+        } catch (nextErr) {
+          this._restorePausedStateOnError(nextErr);
+          return;
+        }
+      }
+      this._restorePausedStateOnError(err);
+    }
   }
 
   async runToLocation(filePath, line) {
@@ -839,12 +1009,16 @@ class GDBSession extends EventEmitter {
     }
 
     // 3. Watch expressions
+    if (this.state !== 'paused' || !this.proc) return;
     await this._refreshWatches();
 
     // 4. CPU Registers (top general-purpose registers)
+    if (this.state !== 'paused' || !this.proc) return;
     await this._refreshRegisters();
 
-    this._emitSnapshot();
+    if (this.state === 'paused') {
+      this._emitSnapshot();
+    }
   }
 
   /**
@@ -1128,13 +1302,69 @@ class GDBSession extends EventEmitter {
       return;
     }
 
+    const frame = results.frame || {};
+
+    // 1. If stepping past the closing brace `}` of main() landed in CRT / glibc exit stub (`??`, `__libc_start_main`, `__tmainCRTStartup`),
+    // automatically continue so the inferior exits cleanly instead of getting stuck at `??` without line bounds.
+    if (
+      (reason === 'end-stepping-range' || reason === 'function-finished') &&
+      this._isCrtOrUnknownExitFrame(frame)
+    ) {
+      this._lastStepOrigin = null;
+      this._lastStepMode = null;
+      this._autoSkipDepth = 0;
+      this.state = 'running';
+      try {
+        await this.sendCommand('-exec-continue');
+        return;
+      } catch (_) {}
+    }
+
+    // 2. If user clicked Step Into / Step Over / Step Out and GDB stopped inside an inlined C++ STL / system header frame
+    // (such as bits/allocator.h or basic_string.h), automatically step out back to user source code!
+    if (
+      this._lastStepOrigin &&
+      this._autoSkipDepth < 8 &&
+      (reason === 'end-stepping-range' || reason === 'function-finished')
+    ) {
+      if (this._isSystemLibraryFrame(frame)) {
+        this._autoSkipDepth++;
+        this.state = 'running';
+        try {
+          await this.sendCommand('-exec-finish');
+          return;
+        } catch (_) {
+          try {
+            await this.sendCommand('-exec-next');
+            return;
+          } catch (__) {}
+        }
+      } else if (
+        this._autoSkipDepth > 0 &&
+        frame.func === this._lastStepOrigin.func &&
+        Number(frame.line) === Number(this._lastStepOrigin.line)
+      ) {
+        // Returned from inlined STL helper back to the exact same line where stepping started;
+        // step once more so user either enters the user function on this line or advances to the next line.
+        this._autoSkipDepth++;
+        this.state = 'running';
+        const resumeCmd = this._lastStepMode === 'stepInto' ? '-exec-step' : '-exec-next';
+        try {
+          await this.sendCommand(resumeCmd);
+          return;
+        } catch (_) {}
+      }
+    }
+    this._lastStepOrigin = null;
+    this._lastStepMode = null;
+    this._autoSkipDepth = 0;
+
     this.state = 'paused';
     this.currentFrame = 0;
     if (results['thread-id']) {
       this.currentThread = Number(results['thread-id']) || 1;
     }
 
-    const frame = results.frame || {};
     this.stopLocation = {
       file: frame.fullname || frame.file || this.sourceFile || '',
       line: frame.line ? Number(frame.line) : 1,
@@ -1145,13 +1375,23 @@ class GDBSession extends EventEmitter {
       signalMeaning: results['signal-meaning'] || null
     };
 
-    await this.refreshState();
+    const refreshTask = this.refreshState();
+    this._refreshPromise = refreshTask;
+    try {
+      await refreshTask;
+    } finally {
+      if (this._refreshPromise === refreshTask) {
+        this._refreshPromise = null;
+      }
+    }
 
-    this.emit('status', {
-      state: 'paused',
-      reason,
-      location: this.stopLocation
-    });
+    if (this.state === 'paused') {
+      this.emit('status', {
+        state: 'paused',
+        reason,
+        location: this.stopLocation
+      });
+    }
   }
 
   _startOutputWatcher() {

@@ -2,6 +2,19 @@
 
 All notable changes to the **Dream C++ Debugger (GDB)** extension will be documented in this file.
 
+## [1.1.4] - 2026-11-09
+
+### Fixed
+- **修复点击「进入 (Step Into)」后再点击「跳出 (Step Out)」导致「继续、跳过、跳出、进入」四个按钮全部点击无反应的 Bug**：
+  - **原因 1（`this.state` 状态锁死在 `'running'`）**：旧版 `stepOut()` 在调用 `await this.sendCommand('-exec-finish')` **之前**直接将 `this.state = 'running'`，且没有 `try / catch` 错误恢复，也未向前端推送 `running` 快照。当在 `main()` 最外层栈帧（或子函数跳回 `main()` 后）点击「跳出」时，GDB 立即返回 `^error,msg="\"finish\" not meaningful in the outermost frame."`（且不会发出 `*stopped` 事件），导致后端 `this.state` 永久卡死在 `'running'`，而前端界面按钮仍显示可点击；此后点击「继续 / 跳过 / 跳出 / 进入」全部在第一行 `if (this.state !== 'paused') return;` 被静默拦截返回。
+  - **原因 2（「进入」误跳入 C++ STL 系统底层头文件与 CRT 退出桩）**：在包含 `std::string`、`std::vector`、`cin`、`cout` 的代码行点击「进入 (`-exec-step`)」会跳入 `/usr/include/c++/bits/allocator.h` 等内联模板头文件中；或者在 `main()` 末尾跳出到无调试行号信息的 `__libc_start_main` / `__tmainCRTStartup` (`func === '??'`)，导致后续单步报错 `Cannot find bounds of current function`。
+  - **原因 3（`refreshState()` 变量刷新与单步命令并发竞态）**：上一次单步暂停后的 `refreshState()` 仍在异步执行 GDB MI 变量查询时，若立刻点击下一个单步按钮，会导致 `-exec-finish` 与变量查询命令并发冲突。
+  - **修复方案**：
+    1. 为 `continue()`、`stepOver()`、`stepInto()`、`stepOut()` 全面增加 `try / catch` 与 `_restorePausedStateOnError()` 状态恢复保护，任何命令报错时立即恢复 `this.state = 'paused'` 并同步前端快照，绝不锁死状态机；
+    2. 当处于 `main()` 最外层栈帧点击「跳出 (`stepOut`)」时，自动智能转为「单步跳过 (`stepOver`)」，不再触发最外层栈帧报错或跳出到 CRT 汇编桩；
+    3. 自动配置 GDB `skip -rfu ^std::` / `^__gnu_cxx::` 并在 `_handleStoppedRecord` 中自动跳出内联 STL 系统头文件帧，使「进入」只进入用户自己编写的函数；
+    4. 引入 `_waitPendingRefresh()` 串行化等待机制，消除变量刷新与单步执行的并发竞态。
+
 ## [1.1.3] - 2026-11-09
 
 ### Changed & Added
