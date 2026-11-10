@@ -213,21 +213,36 @@ async function runAllTests() {
   assert.ok(titleVar && titleVar.displayValue.includes('Dream C++ GDB Debugger'));
   ok('GDBSession unwrapped std::vector<int> fib, int dp[6], and std::string title');
 
-  // Test live variable editing in GDB
-  const edited = await session.setVariableValue('result', '777');
-  assert.strictEqual(edited, true);
+  // Test live variable editing in GDB (scalar, std::string, std::vector element, and C array)
+  const editedScalar = await session.setVariableValue('result', '777');
+  assert.strictEqual(editedScalar, true);
   const resVar = session.locals.find((v) => v.name === 'result');
   assert.strictEqual(resVar.displayValue, '777');
-  ok('GDBSession modified variable `result = 777` live during pause');
 
-  // Continue to program exit and verify programOutput captures modified result 777
+  const editedStr = await session.setVariableValue('title', '"Modified Title"');
+  assert.strictEqual(editedStr, true, 'Modifying std::string title should succeed without Invalid cast');
+  const updatedTitle = session.locals.find((v) => v.name === 'title');
+  assert.ok(updatedTitle && updatedTitle.displayValue.includes('Modified Title'));
+
+  const editedVecElem = await session.setVariableValue('fib[0]', '99');
+  assert.strictEqual(editedVecElem, true, 'Modifying std::vector element fib[0] should succeed');
+  const updatedFib = session.locals.find((v) => v.name === 'fib');
+  assert.strictEqual(updatedFib.elements[0], '99');
+
+  const editedArr = await session.setVariableValue('dp', '{ 10, 20, 30, 40, 50, 60 }');
+  assert.strictEqual(editedArr, true, 'Modifying C array dp should succeed');
+  const updatedDp = session.locals.find((v) => v.name === 'dp');
+  assert.deepStrictEqual(updatedDp.elements, ['10', '20', '30', '40', '50', '60']);
+  ok('GDBSession modified scalar `result`, std::string `title`, vector `fib[0]`, and array `dp` live during pause');
+
+  // Continue to program exit and verify programOutput captures modified title & result 777
   stopPromise = waitNextPause();
   await session.continue();
   const exitEv = await stopPromise;
   assert.strictEqual(exitEv.state, 'exited');
   assert.ok(
-    session.programOutput.includes('PrefixSum(5) = 777'),
-    `Expected modified output 777, got: ${session.programOutput}`
+    session.programOutput.includes('[Modified Title] PrefixSum(5) = 777'),
+    `Expected modified output [Modified Title] PrefixSum(5) = 777, got: ${session.programOutput}`
   );
   await session.stop();
   ok('GDBSession captured modified stdout output and exited cleanly');

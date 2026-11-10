@@ -2,6 +2,13 @@
 
 All notable changes to the **Dream C++ Debugger (GDB)** extension will be documented in this file.
 
+## [1.1.2] - 2026-11-09
+
+### Fixed & Enhanced
+- **修复修改 `std::string` 变量（如 `title`）时 GDB 报错 `Invalid cast.` 的问题，并支持直接修改 `std::vector` 与数组元素**：
+  - **原因**：在 GDB 中直接执行 `title = "xxx"` 时，GDB 表达式求值器无法自动将字符串字面量隐式重载转换为 `std::string`，从而抛出 `Invalid cast.`。
+  - **修复**：在 `setVariableValue` 中自动识别 `std::string` 类型（兼容带引号 `"abc"` 或不带引号 `abc` 输入），通过调用 `title.assign("...", byteLen)`（以及底层 `_M_dataplus._M_p` 内存写入兜底）完成字符串热修改；同时支持直接点击右侧调试台中的数组/`vector` 单元格 `[i]` 或整体修改 `std::vector` 与 C 数组的值。
+
 ## [1.1.1] - 2026-11-09
 
 ### Fixed

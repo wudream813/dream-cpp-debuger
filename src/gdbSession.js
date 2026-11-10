@@ -538,19 +538,102 @@ class GDBSession extends EventEmitter {
   }
 
   /**
-   * Modify a local variable or expression value during pause.
+   * Modify a local variable, std::string, std::vector, array, or element value during pause.
    */
   async setVariableValue(name, newValue) {
     if (this.state !== 'paused') return false;
-    const escapedExpr = `${name} = ${newValue}`.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    const cleanName = String(name || '').trim();
+    const rawInput = String(newValue ?? '').trim();
+    if (!cleanName) return false;
+
+    const escapeForMI = (expr) => expr.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    const escapeCStringLiteral = (str) =>
+      str
+        .replace(/\\/g, '\\\\')
+        .replace(/"/g, '\\"')
+        .replace(/\n/g, '\\n')
+        .replace(/\r/g, '\\r')
+        .replace(/\t/g, '\\t');
+
     try {
+      // Check if modifying an indexed element like `fib[2]` or `dp[0]`
+      const idxMatch = cleanName.match(/^([a-zA-Z_]\w*)\[(\d+)\]$/);
+      if (idxMatch) {
+        const baseName = idxMatch[1];
+        const elemIdx = parseInt(idxMatch[2], 10);
+        const baseVar = this.locals.find((v) => v.name === baseName);
+        if (baseVar && (baseVar.type.includes('vector') || (baseVar.raw && baseVar.raw.includes('_M_impl')))) {
+          const vecAssign = `*(${baseName}._M_impl._M_start + ${elemIdx}) = ${rawInput}`;
+          await this.sendCommand(`-data-evaluate-expression "${escapeForMI(vecAssign)}"`);
+          await this.refreshState();
+          return true;
+        }
+      }
+
+      const targetVar = this.locals.find((v) => v.name === cleanName);
+      const isStdString =
+        targetVar &&
+        (targetVar.type.includes('string') ||
+          (targetVar.raw && targetVar.raw.includes('_M_dataplus')) ||
+          (targetVar.kind === 'string' && !targetVar.type.includes('*') && !targetVar.type.includes('[')));
+
+      // 1. Handle std::string assignment (avoids GDB `Invalid cast.` on `title = "..."`)
+      if (isStdString) {
+        let strContent = rawInput;
+        if (
+          (strContent.startsWith('"') && strContent.endsWith('"')) ||
+          (strContent.startsWith("'") && strContent.endsWith("'"))
+        ) {
+          strContent = strContent.slice(1, -1);
+        }
+        const byteLen = Buffer.byteLength(strContent, 'utf8');
+        const cLiteral = `"${escapeCStringLiteral(strContent)}"`;
+        try {
+          const assignExpr = `${cleanName}.assign(${cLiteral}, ${byteLen})`;
+          await this.sendCommand(`-data-evaluate-expression "${escapeForMI(assignExpr)}"`);
+        } catch (_) {
+          // Fallback: direct buffer copy into _M_dataplus._M_p if .assign symbol is unavailable
+          const memcpyExpr = `(void*)memcpy(${cleanName}._M_dataplus._M_p, ${cLiteral}, ${byteLen + 1})`;
+          await this.sendCommand(`-data-evaluate-expression "${escapeForMI(memcpyExpr)}"`);
+          await this.sendCommand(
+            `-data-evaluate-expression "${escapeForMI(`${cleanName}._M_string_length = ${byteLen}`)}"`
+          );
+        }
+        await this.refreshState();
+        return true;
+      }
+
+      // 2. Handle whole std::vector or C array assignment (e.g. `{1, 2, 3}` or `vector[3] { 1, 2, 3 }`)
+      if (targetVar && targetVar.kind === 'array') {
+        const stripped = rawInput
+          .replace(/^(?:std::)?vector\[\d+\]\s*/i, '')
+          .replace(/^\[\d+\]\s*/, '')
+          .replace(/^\{/, '')
+          .replace(/\}$/, '')
+          .trim();
+        const parts = stripped
+          ? stripped.split(',').map((s) => s.trim()).filter(Boolean)
+          : [];
+        const isVec = targetVar.type.includes('vector') || (targetVar.raw && targetVar.raw.includes('_M_impl'));
+        for (let i = 0; i < parts.length; i++) {
+          const elemAssign = isVec
+            ? `*(${cleanName}._M_impl._M_start + ${i}) = ${parts[i]}`
+            : `${cleanName}[${i}] = ${parts[i]}`;
+          await this.sendCommand(`-data-evaluate-expression "${escapeForMI(elemAssign)}"`);
+        }
+        await this.refreshState();
+        return true;
+      }
+
+      // 3. Default scalar / pointer / struct member assignment
+      const escapedExpr = escapeForMI(`${cleanName} = ${rawInput}`);
       await this.sendCommand(`-data-evaluate-expression "${escapedExpr}"`);
       await this.refreshState();
       return true;
     } catch (err) {
       this.emit('output', {
         category: 'system',
-        text: `[Dream GDB] 修改变量 ${name} 失败: ${err.message}`
+        text: `[Dream GDB] 修改变量 ${cleanName} 失败: ${err.message}`
       });
       return false;
     }

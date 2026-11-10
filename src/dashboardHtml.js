@@ -439,6 +439,12 @@ function getDashboardHtml(options = {}) {
       background: var(--array-cell-bg);
       padding: 4px 8px;
       font-family: var(--font-mono);
+      cursor: pointer;
+      transition: all 0.14s ease;
+    }
+    .array-cell:hover {
+      border-color: var(--paused-border);
+      transform: translateY(-1px);
     }
     .array-idx {
       font-size: 10.5px;
@@ -794,10 +800,11 @@ function getDashboardHtml(options = {}) {
           v.kind === 'uninitialized' ? 'uninitialized' :
           v.kind === 'string' ? 'string' :
           v.kind === 'pointer' ? 'pointer' : '';
+        const varBaseName = v.name || v.expr || '';
         let arrayHtml = '';
         if (Array.isArray(v.elements) && v.elements.length > 0 && v.kind === 'array') {
           const cells = v.elements.map((item, idx) =>
-            '<div class="array-cell">' +
+            '<div class="array-cell" data-edit-var="' + escapeHtml(varBaseName + '[' + idx + ']') + '" data-cur-val="' + escapeHtml(item) + '" title="点击修改 ' + escapeHtml(varBaseName + '[' + idx + ']') + ' 的值">' +
               '<span class="array-idx">[' + idx + ']</span>' +
               '<span class="array-v">' + escapeHtml(item) + '</span>' +
             '</div>'
@@ -805,11 +812,16 @@ function getDashboardHtml(options = {}) {
           arrayHtml = '<div class="array-strip">' + cells + '</div>';
         }
 
+        const editableVal =
+          Array.isArray(v.elements) && v.kind === 'array'
+            ? '{ ' + v.elements.join(', ') + ' }'
+            : String(v.displayValue ?? v.value ?? '');
+
         const actionBtn = options.isWatch
           ? '<button class="icon-action" data-remove-watch="' + escapeHtml(v.id || v.expr) + '" title="移除监视">✕ 移除</button>'
           : v.kind === 'uninitialized'
           ? ''
-          : '<button class="icon-action" data-edit-var="' + escapeHtml(v.name) + '" data-cur-val="' + escapeHtml(v.displayValue) + '" title="修改变量值">✎ 修改值</button>';
+          : '<button class="icon-action" data-edit-var="' + escapeHtml(varBaseName) + '" data-cur-val="' + escapeHtml(editableVal) + '" title="修改变量值">✎ 修改值</button>';
 
         return (
           '<div class="var-item ' + (v.changed ? 'changed' : '') + '">' +
