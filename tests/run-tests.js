@@ -26,6 +26,7 @@ const {
 
 const { GDBSession } = require('../src/gdbSession');
 const { getSidebarHtml } = require('../src/sidebarHtml');
+const { getDashboardHtml } = require('../src/dashboardHtml');
 
 async function runAllTests() {
   let passed = 0;
@@ -261,19 +262,24 @@ async function runAllTests() {
   fs.rmSync(path.join(__dirname, '..', 'examples', '.dream-debug'), { recursive: true, force: true });
   ok('GDBSession 3rd consecutive start() (mid-session restart) succeeded and exited cleanly');
 
-  console.log('\n=== 4. Sidebar Webview HTML Verification ===');
-  const html = getSidebarHtml({ nonce: 'test-nonce', demoMode: true });
-  assert.ok(html.includes('局部变量 & 数组可视化'));
-  assert.ok(html.includes('监视表达式 (Watch)'));
-  assert.ok(html.includes('程序输入 / 输出 (stdin & stdout)'));
-  assert.ok(html.includes('调用栈 (Call Stack)'));
-  assert.ok(html.includes('断点管理 (支持条件断点)'));
-  assert.ok(html.includes('GDB 命令台 & CPU 寄存器'));
-  assert.ok(html.includes('body.vscode-light'));
-  assert.ok(html.includes('body.vscode-dark'));
-  assert.ok(html.includes('diag-warning'));
-  assert.ok(html.includes('diag-error'));
-  ok('getSidebarHtml renders high-contrast dark/light palettes and distinct warning/error banners');
+  console.log('\n=== 4. Dual-Pane UI Verification (Left Sidebar I/O + Right Dashboard) ===');
+  const sidebarHtml = getSidebarHtml({ nonce: 'test-nonce' });
+  assert.ok(sidebarHtml.includes('标准输入 (stdin)'));
+  assert.ok(sidebarHtml.includes('程序输出 (stdout / stderr)'));
+  assert.ok(sidebarHtml.includes('编译并开始 GDB 调试'));
+  assert.ok(!sidebarHtml.includes('localsContainer'), 'Left sidebar should only hold compile/run and stdin/stdout');
+  assert.ok(sidebarHtml.includes('body.vscode-light'));
+  assert.ok(sidebarHtml.includes('diag-warning'));
+  ok('Left Sidebar (getSidebarHtml) holds only Compile/Run controls + Stdin/Stdout I/O');
+
+  const dashHtml = getDashboardHtml({ nonce: 'test-nonce' });
+  assert.ok(dashHtml.includes('局部变量 & STL / 数组可视化'));
+  assert.ok(dashHtml.includes('监视表达式 (Watch Expressions)'));
+  assert.ok(dashHtml.includes('调用栈 (Call Stack)'));
+  assert.ok(dashHtml.includes('断点管理 (支持条件断点)'));
+  assert.ok(dashHtml.includes('GDB 交互命令台 & CPU 寄存器'));
+  assert.ok(dashHtml.includes('body.vscode-light'));
+  ok('Right Dashboard (getDashboardHtml) renders full spacious GDB inspection workspace');
 
   console.log(`\n🎉 All ${passed} tests passed!`);
 }

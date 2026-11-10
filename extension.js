@@ -1,5 +1,7 @@
 /**
  * Dream C++ Debugger (GDB) — Main VS Code Extension Entry
+ * Left Sidebar: Compile / Run controls + Stdin & Stdout I/O
+ * Right Editor Pane (`ViewColumn.Beside`): Full GDB Debug Dashboard (Variables, STL/Arrays, Watch, Call Stack, Breakpoints, Console)
  * Author: wudream813
  */
 'use strict';
@@ -10,6 +12,7 @@ const fs = require('fs');
 const { GDBSession } = require('./src/gdbSession');
 const { isSourceFile, compileSourceFile, runExecutable } = require('./src/compiler');
 const { getSidebarHtml } = require('./src/sidebarHtml');
+const { getDashboardHtml } = require('./src/dashboardHtml');
 const { DreamGdbDebugAdapter } = require('./src/debugAdapter');
 
 class DreamSidebarProvider {
@@ -62,6 +65,7 @@ class DreamDebugController {
     this.stdinText = '';
     this.lastTargetFile = null;
     this.syncingBreakpoints = false;
+    this.dashboardPanel = null;
 
     this.diagnostics = vscode.languages.createDiagnosticCollection('dream-cpp-debug');
     this.outputChannel = vscode.window.createOutputChannel('Dream C++ Debugger (GDB)');
@@ -69,7 +73,7 @@ class DreamDebugController {
     // Editor decorations for paused line & inline variable values
     this.pausedLineDecoration = vscode.window.createTextEditorDecorationType({
       isWholeLine: true,
-      backgroundColor: 'rgba(245, 158, 11, 0.16)',
+      backgroundColor: 'rgba(245, 158, 11, 0.18)',
       borderWidth: '0 0 0 3px',
       borderStyle: 'solid',
       borderColor: '#f59e0b',
@@ -89,12 +93,65 @@ class DreamDebugController {
 
     // Status bar item
     this.statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
-    this.statusBarItem.command = 'dream-cpp-debug.openSidebar';
+    this.statusBarItem.command = 'dream-cpp-debug.openDashboard';
     this.updateStatusBar('idle');
     this.statusBarItem.show();
 
     this.sidebarProvider = new DreamSidebarProvider(context, this);
     this._bindSessionEvents();
+  }
+
+  /**
+   * Open or reveal the spacious GDB Debug Dashboard in the right half of the current editor window (`ViewColumn.Beside`).
+   */
+  openDashboardPanel(preserveFocus = true) {
+    if (this.dashboardPanel) {
+      this.dashboardPanel.reveal(vscode.ViewColumn.Beside, preserveFocus);
+      this.pushSnapshotToWebview();
+      return this.dashboardPanel;
+    }
+
+    // Ensure the active C/C++ editor stays in ViewColumn.One before splitting to Beside
+    const activeEditor = vscode.window.activeTextEditor;
+    const targetColumn =
+      activeEditor && activeEditor.viewColumn === vscode.ViewColumn.One
+        ? vscode.ViewColumn.Two
+        : vscode.ViewColumn.Beside;
+
+    const panel = vscode.window.createWebviewPanel(
+      'dreamCppDebugDashboard',
+      'GDB 调试台 · Dream C++',
+      { viewColumn: targetColumn, preserveFocus },
+      {
+        enableScripts: true,
+        retainContextWhenHidden: true,
+        localResourceRoots: [this.context.extensionUri]
+      }
+    );
+
+    panel.iconPath = vscode.Uri.joinPath(this.context.extensionUri, 'media', 'activity-icon.svg');
+    panel.webview.html = getDashboardHtml({
+      nonce: String(Date.now())
+    });
+
+    panel.webview.onDidReceiveMessage(async (msg) => {
+      await this.handleWebviewMessage(msg);
+    });
+
+    panel.onDidDispose(() => {
+      this.dashboardPanel = null;
+    });
+
+    this.dashboardPanel = panel;
+    this.pushSnapshotToWebview();
+    return panel;
+  }
+
+  postToAllViews(message) {
+    this.sidebarProvider.postMessage(message);
+    if (this.dashboardPanel && this.dashboardPanel.webview) {
+      this.dashboardPanel.webview.postMessage(message);
+    }
   }
 
   _bindSessionEvents() {
@@ -125,7 +182,7 @@ class DreamDebugController {
       if (ev.text) {
         this.outputChannel.appendLine(ev.text);
         if (ev.category === 'console' || ev.category === 'system') {
-          this.sidebarProvider.postMessage({
+          this.postToAllViews({
             type: 'consoleOutput',
             text: ev.text
           });
@@ -154,6 +211,12 @@ class DreamDebugController {
       this.lastTargetFile = editor.document.fileName;
       return this.lastTargetFile;
     }
+    for (const visible of vscode.window.visibleTextEditors) {
+      if (visible.document && isSourceFile(visible.document.fileName)) {
+        this.lastTargetFile = visible.document.fileName;
+        return this.lastTargetFile;
+      }
+    }
     if (this.lastTargetFile && fs.existsSync(this.lastTargetFile)) {
       return this.lastTargetFile;
     }
@@ -164,7 +227,8 @@ class DreamDebugController {
     const snap = this.session.getSnapshot();
     const activeFile = this.resolveActiveSourceFile();
     snap.activeFileName = activeFile ? path.basename(activeFile) : '';
-    this.sidebarProvider.postMessage({
+    snap.stdinText = this.stdinText;
+    this.postToAllViews({
       type: 'snapshot',
       snapshot: snap
     });
@@ -204,13 +268,16 @@ class DreamDebugController {
 
     if (!compileResult.success) {
       this.updateStatusBar('idle');
-      vscode.window.showErrorMessage(`编译失败 (CE)，请查看侧边栏或“问题 (Problems)”面板中的错误详情。`);
+      vscode.window.showErrorMessage(`编译失败 (CE)，请查看左侧边栏或“问题 (Problems)”面板中的错误详情。`);
       return;
     }
 
     this.outputChannel.appendLine(
       `[Dream Compiler] 编译成功 (${compileResult.durationMs} ms) -> ${compileResult.executable}`
     );
+
+    // Automatically open the spacious Debug Dashboard in the right half of the current editor window
+    this.openDashboardPanel(true);
 
     this.session.gdbPath = this.config.get('gdbPath', 'gdb');
     this.session.maxArrayPreview = this.config.get('maxArrayPreview', 16);
@@ -276,7 +343,7 @@ class DreamDebugController {
   applyCompilerDiagnostics(sourceFile, compileResult) {
     this.diagnostics.clear();
     const list = compileResult.diagnostics || [];
-    this.sidebarProvider.postMessage({
+    this.postToAllViews({
       type: 'compileDiagnostics',
       diagnostics: list,
       success: compileResult.success
@@ -308,9 +375,15 @@ class DreamDebugController {
   async revealLocationInEditor(filePath, line, decorate = false) {
     if (!filePath || !fs.existsSync(filePath)) return;
     try {
+      const normTarget = this.session.normalizeFilePath(filePath);
+      const existingEditor = vscode.window.visibleTextEditors.find(
+        (ed) => ed.document && this.session.normalizeFilePath(ed.document.fileName) === normTarget
+      );
+      const targetColumn = existingEditor ? existingEditor.viewColumn : vscode.ViewColumn.One;
+
       const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(filePath));
       const editor = await vscode.window.showTextDocument(doc, {
-        viewColumn: vscode.ViewColumn.One,
+        viewColumn: targetColumn,
         preserveFocus: true
       });
       const zeroLine = Math.max(0, (Number(line) || 1) - 1);
@@ -323,17 +396,17 @@ class DreamDebugController {
   }
 
   applyEditorDecorations(location) {
-    const editor = vscode.window.activeTextEditor;
-    if (!editor || !location || !location.file) return;
-    if (this.session.normalizeFilePath(editor.document.fileName) !== this.session.normalizeFilePath(location.file)) {
-      return;
-    }
+    if (!location || !location.file) return;
+    const normLoc = this.session.normalizeFilePath(location.file);
+    const editor = vscode.window.visibleTextEditors.find(
+      (ed) => ed.document && this.session.normalizeFilePath(ed.document.fileName) === normLoc
+    );
+    if (!editor) return;
 
     const zeroLine = Math.max(0, (location.line || 1) - 1);
     const lineRange = editor.document.lineAt(Math.min(zeroLine, editor.document.lineCount - 1)).range;
     editor.setDecorations(this.pausedLineDecoration, [lineRange]);
 
-    // Inline variable value preview on current paused line
     const showInline = vscode.workspace.getConfiguration('dreamCppDebug').get('showInlineValues', true);
     if (showInline && this.session.locals.length > 0) {
       const summary = this.session.locals
@@ -403,6 +476,9 @@ class DreamDebugController {
       case 'compileAndRun':
         await this.compileAndQuickRun(msg.stdin);
         break;
+      case 'openDashboard':
+        this.openDashboardPanel(false);
+        break;
       case 'continue':
         await this.session.continue();
         break;
@@ -467,7 +543,7 @@ class DreamDebugController {
       }
       case 'gdbCommand':
         await this.session.evaluateConsoleCommand(msg.command).catch((err) => {
-          this.sidebarProvider.postMessage({
+          this.postToAllViews({
             type: 'consoleOutput',
             text: `[错误] ${err.message}`
           });
@@ -478,6 +554,9 @@ class DreamDebugController {
 
   dispose() {
     this.session.stop();
+    if (this.dashboardPanel) {
+      this.dashboardPanel.dispose();
+    }
     this.diagnostics.dispose();
     this.outputChannel.dispose();
     this.pausedLineDecoration.dispose();
@@ -489,7 +568,7 @@ class DreamDebugController {
 function activate(context) {
   const controller = new DreamDebugController(context);
 
-  // 1. Register Sidebar Webview
+  // 1. Register Left Sidebar Webview (Compile/Run + Stdin/Stdout)
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider('dream-cpp-debug.sidebar', controller.sidebarProvider, {
       webviewOptions: { retainContextWhenHidden: true }
@@ -559,14 +638,14 @@ function activate(context) {
           const range = new vscode.Range(pos.line, 0, pos.line, 0);
           lenses.push(
             new vscode.CodeLens(range, {
-              title: '$(debug-alt) GDB 调试 (Dream Debugger)',
+              title: '$(debug-alt) GDB 调试 (右侧打开调试台)',
               command: 'dream-cpp-debug.startDebug',
-              tooltip: '自动使用 g++ -g 编译并在侧边栏启动 GDB 调试'
+              tooltip: '自动使用 g++ -g 编译并在当前窗口右半边打开 GDB 调试面板'
             }),
             new vscode.CodeLens(range, {
               title: '$(play) 快速编译运行',
               command: 'dream-cpp-debug.compileAndRun',
-              tooltip: '编译并带入侧边栏 stdin 直接运行输出结果'
+              tooltip: '编译并带入左侧边栏 stdin 直接运行输出结果'
             })
           );
         }
@@ -596,6 +675,7 @@ function activate(context) {
     vscode.debug.registerDebugAdapterDescriptorFactory('dream-cpp-gdb', {
       createDebugAdapterDescriptor() {
         controller.sidebarProvider.reveal();
+        controller.openDashboardPanel(true);
         const adapter = new DreamGdbDebugAdapter(controller.session, (compileRes) => {
           const active = controller.resolveActiveSourceFile();
           if (active) controller.applyCompilerDiagnostics(active, compileRes);
@@ -612,6 +692,7 @@ function activate(context) {
 
   register('dream-cpp-debug.startDebug', () => controller.startDebugSession());
   register('dream-cpp-debug.compileAndRun', () => controller.compileAndQuickRun());
+  register('dream-cpp-debug.openDashboard', () => controller.openDashboardPanel(false));
   register('dream-cpp-debug.continue', () => controller.session.continue());
   register('dream-cpp-debug.pause', () => controller.session.pause());
   register('dream-cpp-debug.stepOver', () => controller.session.stepOver());
@@ -667,13 +748,13 @@ function activate(context) {
     }
     if (!selected) {
       selected = await vscode.window.showInputBox({
-        prompt: '输入要添加到侧边栏监视 (Watch) 的 C++ 表达式',
+        prompt: '输入要添加到右侧调试台监视 (Watch) 的 C++ 表达式',
         placeHolder: '例如: dp[i][j]、*ptr、arr@10'
       });
     }
     if (selected) {
       await controller.session.addWatch(selected);
-      controller.sidebarProvider.reveal();
+      controller.openDashboardPanel(true);
     }
   });
 

@@ -2,6 +2,13 @@
 
 All notable changes to the **Dream C++ Debugger (GDB)** extension will be documented in this file.
 
+## [1.1.0] - 2026-11-09
+
+### Changed & Added
+- **重构为“左侧边栏输入编译 + 右半窗格独立调试大屏”双栏布局**：
+  - **左侧活动栏侧边栏 (`src/sidebarHtml.js`)**：精简为专注负责 **`▶ 编译并开始 GDB 调试`**、**`⚡ 编译运行`**、**`📥 标准输入 (stdin)`** 与 **`📤 程序输出 (stdout / stderr)`**，为多行输入样例和程序输出留出充裕空间。
+  - **右侧独立调试工作台页面 (`src/dashboardHtml.js`)**：启动 GDB 调试时自动在当前编辑器窗格的右半边（`vscode.ViewColumn.Beside`）展开宽敞的 **GDB 调试台** 页面，放置单步控制栏、局部变量 & STL/数组可视化格子、监视表达式、调用栈、条件断点管理、CPU 寄存器与 GDB 命令台，告别侧边栏宽度拥挤问题。
+
 ## [1.0.2] - 2026-11-09
 
 ### Fixed
