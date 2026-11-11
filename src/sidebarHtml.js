@@ -224,9 +224,10 @@ function getSidebarHtml(options = {}) {
 
     .btn-row {
       display: grid;
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
       gap: 7px;
     }
+    .btn-row .btn { min-width: 0; padding-left: 4px; padding-right: 4px; }
 
     .btn {
       display: inline-flex;
@@ -457,16 +458,14 @@ function getSidebarHtml(options = {}) {
     <div class="card-body">
       <div id="compileProgress" class="compile-progress" role="status" aria-live="polite" hidden><span class="compile-spinner" aria-hidden="true"></span><span>正在编译，请稍候…</span></div>
       <div id="compileDiagnostics"></div>
-      <div style="display:flex;justify-content:flex-end;margin-bottom:8px;"><button id="btnUserMode" class="small-action" title="切换新手或老手界面">模式：老手</button></div>
-      <div class="btn-stack">
-        <button id="btnStartDebug" class="btn btn-primary" title="编译并在当前窗格右半边打开 GDB 调试面板 (Ctrl+Shift+F5)">
-          <span id="startDebugLabel">🐞 编译并开始 GDB 调试 (右侧展开)</span>
+      <div style="display:flex;justify-content:flex-end;gap:6px;margin-bottom:8px;"><button id="btnModeSettings" class="small-action" title="在 VS Code 设置中调整界面模式">模式设置</button><button id="btnUserMode" class="small-action" title="切换新手或老手界面">模式：老手</button></div>
+      <div class="btn-row">
+        <button id="btnStartDebug" class="btn btn-primary" title="编译并开始 GDB 调试 (Ctrl+Shift+F5)">
+          <span id="startDebugLabel">🐞 开始调试</span>
         </button>
-        <div class="btn-row">
-          <button id="btnOpenDashboard" class="btn" title="在当前窗格右半边打开调试工作台页面">
-            <span id="dashboardLabel">🖥 右侧调试台</span>
-          </button>
-        </div>
+        <button id="btnOpenDashboard" class="btn" title="在当前窗格右半边打开调试工作台页面">
+          <span id="dashboardLabel">🖥 调试台</span>
+        </button>
       </div>
     </div>
   </div>
@@ -554,6 +553,7 @@ function getSidebarHtml(options = {}) {
         compileDiagnostics: document.getElementById('compileDiagnostics'),
         compileProgress: document.getElementById('compileProgress'),
         btnUserMode: document.getElementById('btnUserMode'),
+        btnModeSettings: document.getElementById('btnModeSettings'),
         startDebugLabel: document.getElementById('startDebugLabel'),
         dashboardLabel: document.getElementById('dashboardLabel'),
         stdinTitle: document.getElementById('stdinTitle'),
@@ -604,6 +604,7 @@ function getSidebarHtml(options = {}) {
       });
 
       el.btnUserMode.addEventListener('click', () => vscode.postMessage({ type: 'changeUserMode' }));
+      el.btnModeSettings.addEventListener('click', () => vscode.postMessage({ type: 'openModeSettings' }));
 
       el.btnStartDebug.addEventListener('click', () => {
         if (currentStdinMode === 'stream') {
@@ -747,8 +748,8 @@ function getSidebarHtml(options = {}) {
         const isRunning = state === 'running' || state === 'starting' || !!snap.quickRunning;
         const beginner = snap.userMode === 'beginner';
         el.btnUserMode.textContent = beginner ? '模式：新手' : '模式：老手';
-        el.startDebugLabel.textContent = beginner ? '🐞 开始调试' : '🐞 编译并开始 GDB 调试 (右侧展开)';
-        el.dashboardLabel.textContent = beginner ? '🖥 打开调试台' : '🖥 右侧调试台';
+        el.startDebugLabel.textContent = '🐞 开始调试';
+        el.dashboardLabel.textContent = '🖥 调试台';
         el.stdinTitle.textContent = beginner ? '📥 程序输入' : '📥 标准输入 (stdin)';
         el.outputTitle.textContent = beginner ? '📤 程序输出' : '📤 程序输出 (stdout / stderr)';
         el.compileProgress.hidden = !isCompiling;

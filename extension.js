@@ -20,6 +20,21 @@ const { getDashboardHtml } = require('./src/dashboardHtml');
 const { DreamGdbDebugAdapter } = require('./src/debugAdapter');
 const { EditorReadOnly } = require('./src/editorReadOnly');
 
+function initialUserMode(config, globalState) {
+  const inspected = config.inspect('interfaceMode');
+  const configured = inspected?.workspaceValue ?? inspected?.globalValue;
+  const effective = config.get('interfaceMode', 'expert');
+  const legacy = globalState.get('dreamCppDebug.userMode');
+  const fallback = globalState.get('dreamCppDebug.modeFallback');
+  const valid = value => ['beginner', 'expert'].includes(value);
+  const useFallback = fallback && valid(fallback.mode) && fallback.previousConfig === effective;
+  return {
+    userMode: useFallback ? fallback.mode : valid(configured) ? effective : valid(legacy) ? legacy : 'expert',
+    modeWasSelected: !!useFallback || valid(configured) || valid(legacy),
+    legacyModeToMigrate: !useFallback && valid(legacy) ? legacy : null
+  };
+}
+
 class DreamSidebarProvider {
   constructor(context, controller) {
     this.context = context;
@@ -64,11 +79,7 @@ class DreamDebugController {
   constructor(context) {
     this.context = context;
     this.config = vscode.workspace.getConfiguration('dreamCppDebug');
-    const configured = this.config.inspect('interfaceMode')?.globalValue;
-    const legacy = context.globalState.get('dreamCppDebug.userMode');
-    this.userMode = ['beginner', 'expert'].includes(configured) ? configured : (legacy === 'beginner' ? 'beginner' : 'expert');
-    this.modeWasSelected = ['beginner', 'expert'].includes(configured) || ['beginner', 'expert'].includes(legacy);
-    this.legacyModeToMigrate = ['beginner', 'expert'].includes(legacy) ? legacy : null;
+    Object.assign(this, initialUserMode(this.config, context.globalState));
     this.modeRevision = 0;
     this.modePromptShown = false;
     this.modePrompt = null;
@@ -134,13 +145,61 @@ class DreamDebugController {
     this._bindSessionEvents();
   }
 
+  async clearOldModeState() {
+    // A failed cleanup is not a failed settings update.
+    try {
+      await this.context.globalState.update('dreamCppDebug.userMode', undefined);
+      await this.context.globalState.update('dreamCppDebug.modeFallback', undefined);
+    } catch (err) {
+      if (this.outputChannel) this.outputChannel.appendLine(`[模式] 清理旧偏好失败：${err.message}`);
+    }
+  }
+
   syncUserModeFromConfig() {
     this.modeRevision = (this.modeRevision || 0) + 1;
     this.modeWasSelected = true;
     this.legacyModeToMigrate = null;
-    void this.context.globalState.update('dreamCppDebug.userMode', undefined).catch(() => {});
+    void this.clearOldModeState();
     this.userMode = vscode.workspace.getConfiguration('dreamCppDebug').get('interfaceMode', 'expert');
     this.pushSnapshotToWebview();
+  }
+
+  openModeSettings() {
+    return vscode.commands.executeCommand('workbench.action.openSettings', '@ext:wudream.dream-cpp-debuger');
+  }
+
+  async setUserMode(mode) {
+    const config = vscode.workspace.getConfiguration('dreamCppDebug');
+    const inspected = config.inspect('interfaceMode');
+    const previousConfig = config.get('interfaceMode', 'expert');
+    // A workspace override takes precedence over the user setting; update the
+    // active level so the selector and Settings always agree.
+    const target = inspected?.workspaceValue !== undefined ? vscode.ConfigurationTarget.Workspace : vscode.ConfigurationTarget.Global;
+    let updateError;
+    try { await config.update('interfaceMode', mode, target); }
+    catch (err) { updateError = err; }
+    if (!updateError) {
+      this.userMode = vscode.workspace.getConfiguration('dreamCppDebug').get('interfaceMode', mode);
+      this.modeWasSelected = true;
+      await this.clearOldModeState();
+      this.pushSnapshotToWebview();
+      return;
+    }
+
+    // Keep mode switching functional even when user settings cannot be written
+    // (for example invalid JSON, policies or an unregistered setting).
+    this.userMode = mode;
+    this.modeWasSelected = true;
+    let storageError;
+    try { await this.context.globalState.update('dreamCppDebug.modeFallback', { mode, previousConfig }); }
+    catch (err) { storageError = err; }
+    this.pushSnapshotToWebview();
+    const description = storageError
+      ? `模式已切换，但无法保存：${updateError.message}；${storageError.message}`
+      : `模式已切换并保存，但未能同步到 VS Code 设置：${updateError.message}`;
+    void Promise.resolve(vscode.window.showWarningMessage(description, '打开模式设置'))
+      .then(action => action === '打开模式设置' ? this.openModeSettings() : undefined)
+      .catch(() => {});
   }
 
   async ensureUserMode() {
@@ -148,12 +207,12 @@ class DreamDebugController {
       const legacy = this.legacyModeToMigrate;
       this.legacyModeToMigrate = null;
       const config = vscode.workspace.getConfiguration('dreamCppDebug');
-      try {
-        if (!config.inspect('interfaceMode')?.globalValue) {
-          await config.update('interfaceMode', legacy, vscode.ConfigurationTarget.Global);
-        }
-        await this.context.globalState.update('dreamCppDebug.userMode', undefined);
-      } catch (_) { vscode.window.showWarningMessage('无法将旧模式迁移到 VS Code 设置，请在设置中手动选择。'); }
+      const inspected = config.inspect('interfaceMode');
+      if (inspected?.globalValue === undefined && inspected?.workspaceValue === undefined) {
+        await this.setUserMode(legacy);
+      } else {
+        await this.clearOldModeState();
+      }
     }
     if (this.modeWasSelected || this.modePromptShown) return;
     this.modePromptShown = true;
@@ -167,15 +226,9 @@ class DreamDebugController {
       const choice = await vscode.window.showQuickPick([
         { label: '🌱 新手模式', description: '简洁、通俗', detail: '隐藏 GDB 命令、寄存器和断点管理；仍可在编辑器设置断点。', mode: 'beginner' },
         { label: '🛠 老手模式', description: '完整功能', detail: '保留 GDB 命令、寄存器和断点管理等高级功能。', mode: 'expert' }
-      ], { title: '选择调试界面模式', placeHolder: '以后可在侧栏随时切换；取消时暂用老手模式', ignoreFocusOut: true });
+      ], { title: '选择调试界面模式', placeHolder: '以后可在侧栏或 VS Code 设置中切换', ignoreFocusOut: true });
       if (!choice || !['beginner', 'expert'].includes(choice.mode) || revision !== (this.modeRevision || 0)) return;
-      try {
-        await vscode.workspace.getConfiguration('dreamCppDebug').update('interfaceMode', choice.mode, vscode.ConfigurationTarget.Global);
-        this.userMode = choice.mode;
-        this.modeWasSelected = true;
-        await this.context.globalState.update('dreamCppDebug.userMode', undefined);
-        this.pushSnapshotToWebview();
-      } catch (_) { vscode.window.showWarningMessage('模式设置未能保存，请在 VS Code 设置中重试。'); }
+      await this.setUserMode(choice.mode);
     })();
     this.modePrompt = task;
     try { await task; } finally { if (this.modePrompt === task) this.modePrompt = null; }
@@ -842,6 +895,9 @@ class DreamDebugController {
     if (!msg || !msg.type) return;
 
     switch (msg.type) {
+      case 'openModeSettings':
+        await this.openModeSettings();
+        break;
       case 'changeUserMode':
         await this.chooseUserMode();
         break;
@@ -1159,6 +1215,8 @@ function activate(context) {
   };
 
   register('dream-cpp-debug.startDebug', () => controller.startDebugSession());
+  register('dream-cpp-debug.chooseUserMode', () => controller.chooseUserMode());
+  register('dream-cpp-debug.openModeSettings', () => controller.openModeSettings());
   register('dream-cpp-debug.openDashboard', () => controller.openDashboardPanel(false));
   register('dream-cpp-debug.continue', () => controller.session.continue());
   register('dream-cpp-debug.pause', () => controller.session.pause());

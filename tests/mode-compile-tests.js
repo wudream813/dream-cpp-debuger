@@ -28,6 +28,11 @@ async function testModeCompile() {
   assert.match(id(S, 'statusPill').textContent, /正在编译/);
   assert.strictEqual(id(S, 'btnStartDebug').disabled, true);
   assert.strictEqual(id(S, 'btnQuickRun'), null);
+  assert.strictEqual(id(S, 'btnStartDebug').parentElement, id(S, 'btnOpenDashboard').parentElement);
+  assert.strictEqual(id(S, 'startDebugLabel').textContent, '🐞 开始调试');
+  assert.strictEqual(id(S, 'dashboardLabel').textContent, '🖥 调试台');
+  id(S, 'btnModeSettings').click();
+  assert.strictEqual(messages.at(-1).type, 'openModeSettings');
   assert.strictEqual(id(D, 'btnStop').disabled, false);
   assert.strictEqual(id(D, 'breakpointCard').hidden, true);
   assert.strictEqual(id(D, 'advancedCard').hidden, true);
@@ -60,19 +65,21 @@ async function testModeCompile() {
   const realRequire = createRequire(filename);
   const pending = [];
   let selected, pickerCalls = 0;
-  let saved;
-  const config = { get: (_k, def) => saved || def, inspect: () => ({ globalValue: saved }), update: async (_k, v) => { saved = v; } };
-  const vscode = { ConfigurationTarget: { Global: 1 }, workspace: { textDocuments: [], getConfiguration: () => config }, window: {
+  let saved, workspaceMode, lastTarget, updateFailure, storageFailure;
+  const state = {}, warnings = [];
+  const config = { get: (_k, def) => workspaceMode || saved || def, inspect: () => ({ globalValue: saved, workspaceValue: workspaceMode }),
+    update: async (_k, v, target) => { lastTarget = target; if (updateFailure) throw Error('bad settings JSON'); if (target === 2) workspaceMode = v; else saved = v; } };
+  const vscode = { ConfigurationTarget: { Global: 1, Workspace: 2 }, workspace: { textDocuments: [], getConfiguration: () => config }, window: {
     showQuickPick: async items => { pickerCalls++; return items.find(i => i.mode === selected); },
-    showWarningMessage() {}, showErrorMessage() {}
+    showWarningMessage(m) { warnings.push(m); }, showErrorMessage() {}
   } };
   const fakeCompiler = { compileSourceFile: () => new Promise((resolve, reject) => pending.push({ resolve, reject })) };
   const m = { exports: {} };
-  vm.runInThisContext('(function(require,module,exports,__filename,__dirname){' + fs.readFileSync(filename, 'utf8') + '\nmodule.exports.TestController = DreamDebugController;\n})')(
+  vm.runInThisContext('(function(require,module,exports,__filename,__dirname){' + fs.readFileSync(filename, 'utf8') + '\nmodule.exports.TestController = DreamDebugController; module.exports.initialUserMode = initialUserMode;\n})')(
     id => id === 'vscode' ? vscode : id === './src/compiler' ? fakeCompiler : realRequire(id), m, m.exports, filename, path.dirname(filename));
   const c = Object.create(m.exports.TestController.prototype);
   let snapshots = [];
-  Object.assign(c, { context: { globalState: { update: async () => {} } },
+  Object.assign(c, { context: { globalState: { get: key => state[key], update: async (key, value) => { if (storageFailure) throw Error('storage denied'); state[key] = value; } } },
     userMode: 'expert', modeWasSelected: false, modePromptShown: false, modePrompt: null,
     runId: 1, compilingRunId: null, compileQueue: Promise.resolve(), statusBarItem: {},
     streamHistory: [], session: { state: 'idle', getSnapshot: () => ({ state: 'idle' }), stop: async () => {} },
@@ -92,6 +99,31 @@ async function testModeCompile() {
   await c.ensureUserMode(); assert.strictEqual(saved, 'expert', 'old preference migrates to settings');
   saved = 'beginner'; c.legacyModeToMigrate = 'expert';
   await c.ensureUserMode(); assert.strictEqual(saved, 'beginner', 'configured mode wins over old preference');
+
+  workspaceMode = 'expert'; saved = 'beginner';
+  await c.setUserMode('beginner');
+  assert.strictEqual(lastTarget, 2, 'write the workspace setting when it overrides the user setting');
+  assert.strictEqual(workspaceMode, 'beginner');
+  assert.strictEqual(snapshots.at(-1).userMode, 'beginner');
+  workspaceMode = undefined;
+  storageFailure = true; const warningCount = warnings.length;
+  await c.setUserMode('expert');
+  assert.strictEqual(saved, 'expert');
+  assert.strictEqual(warnings.length, warningCount, 'cleanup failure must not be reported as settings failure');
+  storageFailure = false; updateFailure = true;
+  await c.setUserMode('beginner');
+  assert.deepStrictEqual(state['dreamCppDebug.modeFallback'], { mode: 'beginner', previousConfig: 'expert' });
+  assert.match(warnings.at(-1), /已切换并保存.*bad settings JSON/);
+  let initial = m.exports.initialUserMode(config, c.context.globalState);
+  assert.strictEqual(initial.userMode, 'beginner', 'fallback survives restart');
+  saved = 'beginner';
+  initial = m.exports.initialUserMode(config, c.context.globalState);
+  assert.strictEqual(initial.userMode, 'beginner', 'changed settings override stale fallback');
+  saved = 'expert'; storageFailure = true;
+  await c.setUserMode('beginner');
+  assert.match(warnings.at(-1), /无法保存.*bad settings JSON.*storage denied/);
+  storageFailure = false; updateFailure = false;
+  await c.setUserMode('expert');
 
   const one = c.compileWithProgress('one.cpp', {}, 1);
   await new Promise(resolve => setImmediate(resolve));
