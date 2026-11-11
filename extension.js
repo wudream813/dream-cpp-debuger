@@ -11,6 +11,7 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const { appendBounded } = require('./src/outputLimits');
+const { readRegularPrefix } = require('./src/safeFiles');
 const { GDBSession } = require('./src/gdbSession');
 const { isSourceFile, compileSourceFile, runExecutable } = require('./src/compiler');
 const { getSidebarHtml } = require('./src/sidebarHtml');
@@ -74,6 +75,8 @@ class DreamDebugController {
     this.resettingRunId = null;
     this.quickRunSawStderr = false;
     this.activeRunProcess = null;
+    this.activeRunCancel = null;
+    this.quickRunId = null;
     this.activeRunStream = false;
 
     this.lastTargetFile = null;
@@ -251,35 +254,30 @@ class DreamDebugController {
     return path.resolve(rawPath);
   }
 
-  updateStdinFileInfo(rawPath) {
+  async updateStdinFileInfo(rawPath) {
+    const requestId = this.stdinPreviewRequestId = (this.stdinPreviewRequestId || 0) + 1;
     this.stdinFile = rawPath || '';
     if (!this.stdinFile) {
       this.stdinFilePreview = '尚未选择输入文件';
       this.pushSnapshotToWebview();
-      return;
+      return false;
     }
     const resolved = this.resolveStdinFilePath(this.stdinFile, this.resolveActiveSourceFile());
-    if (!fs.existsSync(resolved)) {
-      this.stdinFilePreview = `⚠ 文件不存在: ${resolved}`;
-      this.pushSnapshotToWebview();
-      return;
-    }
+    let preview;
+    let valid = false;
     try {
-      const stat = fs.statSync(resolved);
+      const { stat, text } = await readRegularPrefix(resolved, 512);
       const sizeStr = stat.size > 1024 ? `${(stat.size / 1024).toFixed(1)} KB` : `${stat.size} B`;
-      const fd = fs.openSync(resolved, 'r');
-      const buf = Buffer.alloc(Math.min(stat.size, 512));
-      fs.readSync(fd, buf, 0, buf.length, 0);
-      fs.closeSync(fd);
-      const previewContent = buf.toString('utf8');
-      this.stdinFilePreview =
-        `📄 ${path.basename(resolved)} (${sizeStr})\n` +
-        `────────────────────────\n` +
-        `${previewContent}${stat.size > 512 ? '\n...(后略)' : ''}`;
+      preview = `📄 ${path.basename(resolved)} (${sizeStr})\n` +
+        `────────────────────────\n${text}${stat.size > 512 ? '\n...(后略)' : ''}`;
+      valid = true;
     } catch (err) {
-      this.stdinFilePreview = `⚠ 读取文件失败: ${err.message}`;
+      preview = `⚠ 读取文件失败: ${err.message}`;
     }
+    if (requestId !== this.stdinPreviewRequestId) return false;
+    this.stdinFilePreview = preview;
     this.pushSnapshotToWebview();
+    return valid;
   }
 
   pushSnapshotToWebview() {
@@ -305,7 +303,7 @@ class DreamDebugController {
     } else if (options && typeof options === 'object') {
       if (typeof options.stdin === 'string') this.stdinText = options.stdin;
       if (typeof options.stdinMode === 'string') this.stdinMode = options.stdinMode;
-      if (typeof options.stdinFile === 'string') this.updateStdinFileInfo(options.stdinFile);
+      if (typeof options.stdinFile === 'string') await this.updateStdinFileInfo(options.stdinFile);
     }
 
     const sourceFile = this.resolveActiveSourceFile();
@@ -316,21 +314,19 @@ class DreamDebugController {
 
     const resolvedStdinFile =
       this.stdinMode === 'file' ? this.resolveStdinFilePath(this.stdinFile, sourceFile) : '';
-    if (this.stdinMode === 'file' && (!resolvedStdinFile || !fs.existsSync(resolvedStdinFile))) {
+    if (this.stdinMode === 'file' && (!resolvedStdinFile || !(await this.updateStdinFileInfo(this.stdinFile)))) {
       vscode.window.showWarningMessage('请先选择一个有效的本地输入文件 (.in / .txt)，或切换到文本预设/流式输入模式。');
       return;
     }
 
     const runId = ++this.runId;
+    this.quickRunId = null;
     this.resettingRunId = runId;
     this.quickRunSawStderr = false;
     this.streamHistory = [];
     this.session.programOutput = '';
     this.pushSnapshotToWebview();
-    if (this.activeRunProcess) {
-      try { this.activeRunProcess.kill(); } catch (_) {}
-      this.activeRunProcess = null;
-    }
+    this.cancelActiveRun();
 
     // Save dirty document before compiling
     const openDoc = vscode.workspace.textDocuments.find((d) => d.fileName === sourceFile);
@@ -397,7 +393,7 @@ class DreamDebugController {
     } else if (options && typeof options === 'object') {
       if (typeof options.stdin === 'string') this.stdinText = options.stdin;
       if (typeof options.stdinMode === 'string') this.stdinMode = options.stdinMode;
-      if (typeof options.stdinFile === 'string') this.updateStdinFileInfo(options.stdinFile);
+      if (typeof options.stdinFile === 'string') await this.updateStdinFileInfo(options.stdinFile);
     }
 
     const sourceFile = this.resolveActiveSourceFile();
@@ -408,21 +404,19 @@ class DreamDebugController {
 
     const resolvedStdinFile =
       this.stdinMode === 'file' ? this.resolveStdinFilePath(this.stdinFile, sourceFile) : '';
-    if (this.stdinMode === 'file' && (!resolvedStdinFile || !fs.existsSync(resolvedStdinFile))) {
+    if (this.stdinMode === 'file' && (!resolvedStdinFile || !(await this.updateStdinFileInfo(this.stdinFile)))) {
       vscode.window.showWarningMessage('请先选择一个有效的本地输入文件 (.in / .txt)，或切换到文本预设/流式输入模式。');
       return;
     }
 
     const runId = ++this.runId;
+    this.quickRunId = runId;
     this.resettingRunId = runId;
     this.quickRunSawStderr = false;
     this.streamHistory = [];
     this.session.programOutput = '';
     this.pushSnapshotToWebview();
-    if (this.activeRunProcess) {
-      try { this.activeRunProcess.kill(); } catch (_) {}
-      this.activeRunProcess = null;
-    }
+    this.cancelActiveRun();
 
     const openDoc = vscode.workspace.textDocuments.find((d) => d.fileName === sourceFile);
     if (openDoc && openDoc.isDirty) {
@@ -447,6 +441,7 @@ class DreamDebugController {
     if (runId !== this.runId) return;
     this.applyCompilerDiagnostics(sourceFile, compileResult);
     if (!compileResult.success) {
+      this.quickRunId = null;
       vscode.window.showErrorMessage('C/C++ 编译失败 (CE)，请查看错误提示。');
       return;
     }
@@ -460,8 +455,10 @@ class DreamDebugController {
       stdinFile: this.stdinMode === 'file' ? resolvedStdinFile : '',
       streamMode: this.stdinMode === 'stream',
       timeoutMs: this.stdinMode === 'stream' ? 60000 : 10000,
-      onProcess: (proc) => {
+      onProcess: (proc, cancel) => {
+        if (runId !== this.runId) { cancel(); return; }
         this.activeRunProcess = proc;
+        this.activeRunCancel = cancel;
         this.activeRunStream = this.stdinMode === 'stream';
       },
       onOutput: (chunk, _outputSoFar, category) => {
@@ -477,10 +474,35 @@ class DreamDebugController {
 
     if (runId !== this.runId) return;
     this.activeRunProcess = null;
+    this.activeRunCancel = null;
+    this.quickRunId = null;
+    const resultLabel = runRes.cancelled ? '已停止' : runRes.killedByTimeout ? '运行超时' : '运行完毕';
     this.session.programOutput = appendBounded(this.session.programOutput,
       `\n──────────────────────────────\n` +
-      `[运行完毕] 退出码: ${runRes.exitCode} · 耗时: ${runRes.durationMs} ms`);
+      `[${resultLabel}] 退出码: ${runRes.exitCode} · 耗时: ${runRes.durationMs} ms`);
     this.pushSnapshotToWebview();
+  }
+
+  cancelActiveRun() {
+    const cancel = this.activeRunCancel;
+    const proc = this.activeRunProcess;
+    this.activeRunCancel = null;
+    this.activeRunProcess = null;
+    this.activeRunStream = false;
+    if (cancel) cancel();
+    else if (proc) { try { proc.kill(); } catch (_) {} }
+  }
+
+  async stopExecution() {
+    if (this.quickRunId === this.runId) {
+      ++this.runId; // invalidate pending compile/start and late output callbacks
+      this.quickRunId = null;
+      this.resettingRunId = null;
+      this.session.programOutput = appendBounded(this.session.programOutput, '\n[已停止]\n');
+      this.pushSnapshotToWebview();
+    }
+    this.cancelActiveRun();
+    await this.session.stop();
   }
 
   sendStreamStdin(text) {
@@ -682,7 +704,7 @@ class DreamDebugController {
         await this.startDebugSession();
         break;
       case 'stop':
-        await this.session.stop();
+        await this.stopExecution();
         break;
       case 'updateStdinMode':
         this.stdinMode = msg.mode || 'text';
@@ -703,12 +725,12 @@ class DreamDebugController {
           }
         });
         if (uris && uris.length > 0) {
-          this.updateStdinFileInfo(uris[0].fsPath);
+          await this.updateStdinFileInfo(uris[0].fsPath);
         }
         break;
       }
       case 'setStdinFilePath':
-        this.updateStdinFileInfo(msg.filePath || '');
+        await this.updateStdinFileInfo(msg.filePath || '');
         break;
       case 'sendStreamStdin':
         this.sendStreamStdin(msg.text || '');
@@ -778,6 +800,9 @@ class DreamDebugController {
   }
 
   dispose() {
+    ++this.runId;
+    this.quickRunId = null;
+    this.cancelActiveRun();
     this.session.stop();
     if (this.dashboardPanel) {
       this.dashboardPanel.dispose();
@@ -893,7 +918,7 @@ function activate(context) {
   register('dream-cpp-debug.stepInto', () => controller.session.stepInto());
   register('dream-cpp-debug.stepOut', () => controller.session.stepOut());
   register('dream-cpp-debug.restart', () => controller.startDebugSession());
-  register('dream-cpp-debug.stop', () => controller.session.stop());
+  register('dream-cpp-debug.stop', () => controller.stopExecution());
 
   register('dream-cpp-debug.openSidebar', () => {
     vscode.commands.executeCommand('workbench.view.extension.dream-cpp-debug');

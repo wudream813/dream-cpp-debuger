@@ -544,13 +544,24 @@ int main() {
   await require('./security-tests').testSecurity();
   ok('Security regression: literal paths/arguments, safe files, bounds and output limits');
 
+  await require('./safety-regressions').testSafetyRegressions();
+  ok('FIFO and descriptor handling plus timeout/cancel process-tree regressions');
+
   await require('./reset-tests').testResets();
   ok('Sidebar and controller reset history/output across restart and ignore late previous-run output');
 
   console.log(`\n🎉 All ${passed} tests passed!`);
 }
 
-runAllTests().catch((err) => {
+let suiteFinished = false;
+process.on('beforeExit', () => {
+  if (!suiteFinished) {
+    console.error('❌ Test suite exited before all asynchronous tests completed');
+    process.exitCode = 1;
+  }
+});
+runAllTests().then(() => { suiteFinished = true; }).catch((err) => {
   console.error('❌ Test failed:', err);
-  process.exit(1);
+  process.exitCode = 1;
+  suiteFinished = true;
 });

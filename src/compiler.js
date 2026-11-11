@@ -10,6 +10,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { appendBounded } = require('./outputLimits');
+const { openRegularFile } = require('./safeFiles');
 
 const SOURCE_EXTS = new Set(['.cpp', '.cc', '.cxx', '.c++', '.c']);
 const DIAG_REGEX = /^(.+?):(\d+):(?:(\d+):)?\s*(fatal error|error|warning|note|致命错误|错误|警告|附注):\s*(.+)$/i;
@@ -181,86 +182,109 @@ function compileSourceFile(sourceFile, options = {}) {
  * - File stdin (`options.stdinFile`)
  * - Live streaming stdin (`options.streamMode: true`, exposing `onProcess(proc)` so caller can write chunks & close EOF)
  */
-function runExecutable(executablePath, options = {}) {
-  return new Promise((resolve) => {
-    const startTime = Date.now();
-    const args = Array.isArray(options.args) ? options.args : [];
-    const cwd = options.cwd || path.dirname(executablePath);
-    const timeoutMs = options.timeoutMs || (options.streamMode ? 120000 : 15000);
-
-    let stdout = '';
-    let stderr = '';
-    let killedByTimeout = false;
-
-    const proc = spawn(executablePath, args, { cwd, env: process.env });
-    if (typeof options.onProcess === 'function') {
-      options.onProcess(proc);
-    }
-
-    const timer = setTimeout(() => {
-      killedByTimeout = true;
-      try { proc.kill('SIGKILL'); } catch (_) {}
-    }, timeoutMs);
-
-    proc.stdout.on('data', (chunk) => {
-      const text = chunk.toString();
-      stdout = appendBounded(stdout, text);
-      if (typeof options.onOutput === 'function') {
-        options.onOutput(text, stdout, 'stdout');
-      }
-    });
-
-    proc.stderr.on('data', (chunk) => {
-      const text = chunk.toString();
-      stderr = appendBounded(stderr, text);
-      if (typeof options.onOutput === 'function') {
-        options.onOutput(text, stdout + (stderr ? `\n[stderr]\n${stderr}` : ''), 'stderr');
-      }
-    });
-
-    proc.stdin.on('error', () => {}); // EPIPE when the inferior exits before consuming input
-    if (options.stdinFile && fs.existsSync(options.stdinFile)) {
-      const fileStream = fs.createReadStream(options.stdinFile);
-      fileStream.on('error', () => {
-        try { proc.stdin.end(); } catch (_) {}
+async function runExecutable(executablePath, options = {}) {
+  const startTime = Date.now();
+  const args = Array.isArray(options.args) ? options.args : [];
+  const cwd = options.cwd || path.dirname(executablePath);
+  const timeoutMs = options.timeoutMs || (options.streamMode ? 120000 : 15000);
+  // Keep the validated handle open: don't re-open a potentially replaced path.
+  const input = options.stdinFile ? await openRegularFile(options.stdinFile) : null;
+  let inputStream;
+  try {
+    return await new Promise((resolve) => {
+      let stdout = '', stderr = '';
+      let killedByTimeout = false, cancelled = false, settled = false;
+      let fallbackTimer = null;
+      const proc = spawn(executablePath, args, {
+        cwd, env: process.env, detached: process.platform !== 'win32', windowsHide: true
       });
-      fileStream.pipe(proc.stdin);
-    } else if (options.streamMode) {
-      if (typeof options.stdin === 'string' && options.stdin.length > 0) {
-        proc.stdin.write(options.stdin.endsWith('\n') ? options.stdin : `${options.stdin}\n`);
-      }
-      // Keep proc.stdin open in streamMode so user can send additional chunks live!
-    } else {
-      if (typeof options.stdin === 'string' && options.stdin.length > 0) {
-        proc.stdin.write(options.stdin.endsWith('\n') ? options.stdin : `${options.stdin}\n`);
-      }
-      proc.stdin.end();
-    }
 
-    proc.on('error', (err) => {
-      clearTimeout(timer);
-      resolve({
-        exitCode: -1,
-        signal: null,
-        stdout,
-        stderr: `${stderr}\n${err.message}`.trim(),
-        durationMs: Date.now() - startTime,
-        killedByTimeout
-      });
-    });
+      function finish(code, signal, error) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        clearTimeout(fallbackTimer);
+        if (inputStream) inputStream.destroy();
+        // Descendants that escaped the process group can retain the pipes.
+        // Destroy our endpoints so completion itself is bounded.
+        proc.stdin?.destroy();
+        proc.stdout?.destroy();
+        proc.stderr?.destroy();
+        resolve({ exitCode: code, signal, stdout,
+          stderr: error ? `${stderr}\n${error.message}`.trim() : stderr,
+          durationMs: Date.now() - startTime, killedByTimeout, cancelled });
+      }
+      function killTree() {
+        if (!proc.pid) return;
+        if (process.platform === 'win32') {
+          // taskkill /T must run before killing the parent, to discover its tree.
+          const taskkill = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'taskkill.exe');
+          try {
+            const killer = spawn(taskkill, ['/PID', String(proc.pid), '/T', '/F'],
+              { windowsHide: true, stdio: 'ignore' });
+            killer.on('error', () => { try { proc.kill('SIGKILL'); } catch (_) {} });
+          } catch (_) { try { proc.kill('SIGKILL'); } catch (__) {} }
+        } else {
+          try { process.kill(-proc.pid, 'SIGKILL'); }
+          catch (_) { try { proc.kill('SIGKILL'); } catch (__) {} }
+        }
+      }
+      function terminate(reason) {
+        if (settled) return;
+        if (reason === 'timeout') killedByTimeout = true;
+        if (reason === 'cancel') cancelled = true;
+        killTree();
+        if (!fallbackTimer) fallbackTimer = setTimeout(() => {
+          try { proc.kill('SIGKILL'); } catch (_) {}
+          finish(proc.exitCode, proc.signalCode || 'SIGKILL');
+        }, 1000);
+      }
+      const timer = setTimeout(() => terminate('timeout'), timeoutMs);
 
-    proc.on('close', (code, signal) => {
-      clearTimeout(timer);
-      resolve({
-        exitCode: code,
-        signal,
-        stdout,
-        stderr,
-        durationMs: Date.now() - startTime,
-        killedByTimeout
+      proc.stdout.on('data', chunk => {
+        if (settled) return;
+        const text = chunk.toString();
+        stdout = appendBounded(stdout, text);
+        if (typeof options.onOutput === 'function') options.onOutput(text, stdout, 'stdout');
       });
+      proc.stderr.on('data', chunk => {
+        if (settled) return;
+        const text = chunk.toString();
+        stderr = appendBounded(stderr, text);
+        if (typeof options.onOutput === 'function') options.onOutput(text, stdout + (stderr ? `\n[stderr]\n${stderr}` : ''), 'stderr');
+      });
+      proc.stdin.on('error', () => {});
+      proc.on('error', err => finish(-1, null, err));
+      proc.on('exit', () => {
+        // The leader can exit while descendants keep stdout/stderr open.
+        // On Unix terminate the remaining group; on all platforms bound the wait.
+        if (settled) return;
+        if (process.platform !== 'win32' && proc.pid) {
+          try { process.kill(-proc.pid, 'SIGKILL'); } catch (_) {}
+        }
+        if (!fallbackTimer) fallbackTimer = setTimeout(() => finish(proc.exitCode, proc.signalCode), 1000);
+      });
+      proc.on('close', (code, signal) => finish(code, signal));
+      if (typeof options.onProcess === 'function') options.onProcess(proc, () => terminate('cancel'));
+
+      if (input) {
+        inputStream = fs.createReadStream(null, { fd: input.handle.fd, autoClose: false });
+        inputStream.on('error', () => { try { proc.stdin.end(); } catch (_) {} });
+        inputStream.pipe(proc.stdin);
+      } else if (options.streamMode) {
+        if (typeof options.stdin === 'string' && options.stdin.length > 0) {
+          proc.stdin.write(options.stdin.endsWith('\n') ? options.stdin : `${options.stdin}\n`);
+        }
+      } else {
+        if (typeof options.stdin === 'string' && options.stdin.length > 0) {
+          proc.stdin.write(options.stdin.endsWith('\n') ? options.stdin : `${options.stdin}\n`);
+        }
+        proc.stdin.end();
+      }
     });
-  });
+  } finally {
+    if (input) await input.handle.close().catch(() => {});
+  }
 }
 
 module.exports = {

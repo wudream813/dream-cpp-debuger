@@ -11,6 +11,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { appendBounded, MAX_OUTPUT_CHARS } = require('./outputLimits');
+const { readRegularPrefix } = require('./safeFiles');
 const {
   parseMILine,
   extractStdVectorPointers,
@@ -1026,7 +1027,7 @@ class GDBSession extends EventEmitter {
       const frameFile = activeFrame?.fullname || this.stopLocation?.file || this.sourceFile;
       const frameLine = activeFrame?.line || this.stopLocation?.line || 0;
       const frameFunc = activeFrame?.func || this.stopLocation?.func || '';
-      const declInfo = this._findLocalDeclarationLines(
+      const declInfo = await this._findLocalDeclarationLines(
         frameFile,
         frameLine,
         frameFunc,
@@ -1092,15 +1093,14 @@ class GDBSession extends EventEmitter {
    * of each local variable. In C/C++, local variables cannot be referenced before their declaration,
    * so the first appearance of `\bvarName\b` inside the function body is its declaration line.
    */
-  _findLocalDeclarationLines(filePath, currentLine, funcName, varNames) {
+  async _findLocalDeclarationLines(filePath, currentLine, funcName, varNames) {
     const result = new Map();
     if (!filePath || !currentLine || !Array.isArray(varNames) || varNames.length === 0) {
       return result;
     }
-    if (!fs.existsSync(filePath)) return result;
-
     try {
-      const content = fs.readFileSync(filePath, 'utf8');
+      // Never synchronously open a FIFO/device or read an unbounded source file.
+      const { text: content } = await readRegularPrefix(filePath, 2 * 1024 * 1024, true);
       const lines = content.split(/\r?\n/);
       const baseFunc = String(funcName || '')
         .replace(/\(.*$/, '')

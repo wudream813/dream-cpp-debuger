@@ -2,6 +2,15 @@
 
 All notable changes to the **Dream C++ Debugger (GDB)** extension will be documented in this file.
 
+## [1.1.7] - 2026-11-09
+
+### Fixed
+- 输入预览和局部变量声明扫描改为异步读取普通文件，拒绝 FIFO、设备与目录；打开后重新检查句柄，读取失败也始终关闭句柄。
+- 声明扫描最大读取 2 MiB；超大源码跳过声明定位，避免扩展宿主内存耗尽。
+- 快速运行超时、取消、重启及扩展停用时清理进程组；Windows 使用 `taskkill /T /F`，并给输出管道设置关闭期限，避免子进程持有管道导致永久等待。
+- 文件输入在快速运行中使用已经验证的文件句柄，避免检查后重新打开文件时被替换。
+- 补充 FIFO、句柄关闭、进程超时及取消回归测试。
+
 ## [1.1.6] - 2026-11-09
 
 ### Security and reliability

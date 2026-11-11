@@ -43,13 +43,14 @@ async function testResets() {
     workspace: { textDocuments: [], getConfiguration: () => ({ get: (_k, def) => def }) },
     window: { showWarningMessage() {}, showErrorMessage(m) { throw Error(m); } }
   };
+  let runImpl = (_exe, options) => {
+    oldRunOptions = options;
+    options.onProcess({ kill() {}, stdin: { write() {}, end() {} } });
+    return new Promise(resolve => { resolveOldRun = resolve; });
+  };
   const fakeCompiler = {
     compileSourceFile: async () => ({ success: true, executable: '/tmp/test', durationMs: 1 }),
-    runExecutable: (_exe, options) => {
-      oldRunOptions = options;
-      options.onProcess({ kill() {}, stdin: { write() {}, end() {} } });
-      return new Promise(resolve => { resolveOldRun = resolve; });
-    }
+    runExecutable: (...args) => runImpl(...args)
   };
   const m = { exports: {} };
   const wrapped = fs.readFileSync(filename, 'utf8') + '\nmodule.exports.TestController = DreamDebugController;';
@@ -83,5 +84,19 @@ async function testResets() {
   resolveOldRun({ stdout: 'old', stderr: '', exitCode: 0, durationMs: 5 });
   await oldRun;
   assert.strictEqual(controller.session.programOutput, '', 'late quick-run output must not leak into debug session');
+
+  // Stop must invalidate a pending run and invoke its cancellation callback.
+  let cancelCalled = false;
+  runImpl = (_exe, options) => {
+    options.onProcess({ kill() {} }, () => { cancelCalled = true; resolveOldRun({ stdout: '', stderr: '', exitCode: null, durationMs: 1, cancelled: true }); });
+    return new Promise(resolve => { resolveOldRun = resolve; });
+  };
+  const nextRun = controller.compileAndQuickRun();
+  await new Promise(resolve => setImmediate(resolve));
+  await controller.stopExecution();
+  await nextRun;
+  assert.ok(cancelCalled, 'stop must invoke process-tree cancellation');
+  assert.ok(controller.session.programOutput.includes('[已停止]'));
+
 }
 module.exports = { testResets };
