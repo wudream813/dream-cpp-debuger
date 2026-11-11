@@ -1150,13 +1150,24 @@ class GDBSession extends EventEmitter {
               pendingVars.delete(vName);
               continue;
             }
-            const idRe = new RegExp(`(?<![.\\w>])\\b${vName}\\b(?!\\s*\\()`);
-            // Skip matching the function's own name on the signature line
+            // '>' may end a template type (vector<int>v), not just ->.
+            const idRe = new RegExp(`(?<![.\\w])(?<!->)\\b${vName}\\b`);
             if (i === funcStartIdx && vName === baseFunc) continue;
-            if (idRe.test(cleanLine)) {
-              result.set(vName, { line: i + 1, isLoopHeader });
-              pendingVars.delete(vName);
+            const match = idRe.exec(cleanLine);
+            if (!match) continue;
+            const before = cleanLine.slice(0, match.index);
+            const after = cleanLine.slice(match.index + vName.length);
+            // A method/member use is not a declaration.
+            if (/^\s*(?:\.|->)/.test(after) || /->\s*$/.test(before)) continue;
+            if (/^\s*\(/.test(after)) {
+              // Permit direct initializers (vector<int>v(3)) but do not
+              // interpret an ordinary call such as v(...) as a declaration.
+              const prefix = before.slice(Math.max(before.lastIndexOf(';'), before.lastIndexOf('{'), before.lastIndexOf('}')) + 1).trim();
+              const typePrefix = /^(?:(?:const|volatile|static|constexpr|auto)\s+)*(?:(?:[A-Za-z_]\w*::)*[A-Za-z_]\w*)(?:\s*<[^;{}]*>)?\s*[*&]*\s*$/;
+              if (!typePrefix.test(prefix) || /^(?:return|throw|co_return)\b/.test(prefix)) continue;
             }
+            result.set(vName, { line: i + 1, isLoopHeader });
+            pendingVars.delete(vName);
           }
         }
 

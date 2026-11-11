@@ -2,6 +2,13 @@
 
 All notable changes to the **Dream C++ Debugger (GDB)** extension will be documented in this file.
 
+## [1.1.8] - 2026-11-09
+
+### Fixed
+- 修复 `vector<int>v;` 这类模板类型与变量名之间没有空格时，声明位置被误识别为循环内 `v.push_back(...)` 的问题；单步返回循环条件时，局部变量和监视表达式能够显示每次更新后的 vector。
+- 改善模板类型变量直接初始化（如 `vector<int>v(3)`）的声明识别，并避免将 `obj->v` 成员访问误识别为局部变量声明。
+- 添加使用真实 GDB 单步执行 11 次循环的回归测试，验证每次追加后 vector 与监视表达式同步更新；保留声明执行前的未初始化提示。
+
 ## [1.1.7] - 2026-11-09
 
 ### Fixed

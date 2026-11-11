@@ -541,6 +541,9 @@ int main() {
   assert.ok(dashHtml.includes('body.vscode-light'));
   ok('Right Dashboard (getDashboardHtml) renders full spacious GDB inspection workspace');
 
+  await require('./vector-loop-tests').testVectorLoop();
+  ok('Compact vector declaration updates locals and watches after each loop iteration');
+
   await require('./security-tests').testSecurity();
   ok('Security regression: literal paths/arguments, safe files, bounds and output limits');
 
