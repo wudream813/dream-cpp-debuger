@@ -541,6 +541,9 @@ int main() {
   assert.ok(dashHtml.includes('body.vscode-light'));
   ok('Right Dashboard (getDashboardHtml) renders full spacious GDB inspection workspace');
 
+  await require('./global-tests').testGlobals();
+  ok('Globals: GDB source symbols, shadowing, static variables, paging and exit');
+
   await require('./output-file-tests').testOutputFile();
   ok('Output file: large complete live output, safe paths and post-exit state cleanup');
 

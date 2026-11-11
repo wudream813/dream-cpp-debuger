@@ -888,7 +888,7 @@ class DreamDebugController {
       }
       case 'sequencePage': {
         try {
-          const page = await this.session.getSequencePage(msg.name, msg.offset, 32, msg.context);
+          const page = await this.session.getSequencePage(msg.name, msg.offset, 32, msg.context, msg.scope === 'global' ? 'global' : 'local');
           this.postToAllViews({ type: 'sequencePage', requestId: msg.requestId, page });
         } catch (err) {
           this.postToAllViews({ type: 'sequenceError', requestId: msg.requestId, message: err.message });

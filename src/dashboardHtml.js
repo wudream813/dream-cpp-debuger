@@ -662,6 +662,17 @@ function getDashboardHtml(options = {}) {
     </div>
   </div>
 
+  <!-- Global variables from source files -->
+  <div class="section-card">
+    <div class="section-header">
+      <span>🌐 全局变量 (Globals)</span><span id="globalsCount" class="badge-count">0 项</span>
+    </div>
+    <div class="section-body">
+      <div id="globalsInfo" class="empty-hint">暂停时展示源文件目录中的全局变量（只读）。</div>
+      <div id="globalsContainer" class="var-list"></div>
+    </div>
+  </div>
+
   <!-- 2. Watch Expressions (Full-Width Card) -->
   <div class="section-card">
     <div class="section-header">
@@ -755,6 +766,9 @@ function getDashboardHtml(options = {}) {
         btnStop: document.getElementById('btnStop'),
         localsCount: document.getElementById('localsCount'),
         localsContainer: document.getElementById('localsContainer'),
+        globalsCount: document.getElementById('globalsCount'),
+        globalsInfo: document.getElementById('globalsInfo'),
+        globalsContainer: document.getElementById('globalsContainer'),
         watchesCount: document.getElementById('watchesCount'),
         watchInput: document.getElementById('watchInput'),
         btnAddWatch: document.getElementById('btnAddWatch'),
@@ -840,7 +854,7 @@ function getDashboardHtml(options = {}) {
           arrayHtml = '<div class="array-strip">' + v.elements.map((item, idx) => '<div class="array-cell"><span class="array-idx">[' + idx + ']</span><span class="array-v">' + escapeHtml(item) + '</span></div>').join('') + '</div>';
         }
         const editableVal = Array.isArray(v.elements) && v.kind === 'array' ? '{ ' + v.elements.join(', ') + ' }' : String(v.displayValue ?? v.value ?? '');
-        const actionBtn = options.isWatch
+        const actionBtn = options.isGlobal ? '' : options.isWatch
           ? '<button class="icon-action" data-remove-watch="' + escapeHtml(v.id || v.expr) + '" title="移除监视">✕ 移除</button>'
           : v.kind === 'uninitialized' || (v.kind === 'array' && (!seq || seq.truncated)) || (seq && (!seq.editable || seq.elementEditable === false || seq.kind === 'chars' || seq.fullValueUnavailable))
           ? ''
@@ -850,7 +864,8 @@ function getDashboardHtml(options = {}) {
           '<div class="var-item ' + (v.changed ? 'changed' : '') + '">' +
             '<div class="var-main">' +
               '<div class="var-left">' +
-                '<span class="var-name">' + escapeHtml(v.name || v.expr) + '</span>' +
+                '<span class="var-name">' + escapeHtml(v.displayName || v.name || v.expr) + '</span>' +
+                (v.sourceLabel ? '<span class="var-type">' + escapeHtml(v.sourceLabel) + '</span>' : '') +
                 (v.type ? '<span class="var-type">' + escapeHtml(v.type) + '</span>' : '') +
                 (v.changed ? '<span class="var-changed-tag">已更新</span>' : '') +
               '</div>' +
@@ -911,7 +926,7 @@ function getDashboardHtml(options = {}) {
         if (!sequenceState) return;
         sequenceState.offset = offset;
         sequenceMessage.textContent = '正在读取…'; sequenceCells.innerHTML = ''; prev.disabled = true; next.disabled = true;
-        vscode.postMessage({ type: 'sequencePage', name: sequenceState.name, offset, context: sequenceState.context, requestId: ++sequenceRequest });
+        vscode.postMessage({ type: 'sequencePage', name: sequenceState.name, offset, scope: sequenceState.scope || 'local', context: sequenceState.context, requestId: ++sequenceRequest });
       }
       prev.addEventListener('click', () => requestSequence(Math.max(0, sequenceState.offset - 32)));
       next.addEventListener('click', () => requestSequence(sequenceState.offset + 32));
@@ -975,7 +990,7 @@ function getDashboardHtml(options = {}) {
           el.localsContainer.querySelectorAll('[data-seq-open]').forEach(btn => btn.addEventListener('click', () => {
             if (!currentContext) return;
             sequenceState = { name: btn.dataset.seqOpen, context: currentContext, offset: 0 };
-            document.getElementById('sequenceTitle').textContent = sequenceState.name + ' 的元素';
+            document.getElementById('sequenceTitle').textContent = (btn.dataset.seqLabel || sequenceState.name) + ' 的元素';
             overlay.hidden = false; requestSequence(Number(btn.dataset.offset));
           }));
           el.localsContainer.querySelectorAll('[data-seq-index]').forEach(btn => btn.addEventListener('click', () => {
@@ -991,6 +1006,20 @@ function getDashboardHtml(options = {}) {
             });
           });
         }
+
+        // Globals are deliberately read-only; their symbol identity includes the source file.
+        const globals = Array.isArray(snap.globals) && isPaused ? snap.globals : [];
+        el.globalsCount.textContent = globals.length + ' 项';
+        el.globalsInfo.textContent = !isPaused ? '暂停时展示源文件目录中的全局变量（只读）。' :
+          (snap.globalsInfo || (globals.length ? '只读 · 包含当前源文件目录中的全局及文件静态变量' : '未发现可读取的全局变量。'));
+        el.globalsContainer.innerHTML = globals.map(v => renderVariableCard(v, { isGlobal: true })).join('');
+        el.globalsContainer.querySelectorAll('[data-seq-open]').forEach(btn => btn.addEventListener('click', () => {
+          if (!currentContext) return;
+          const variable = globals.find(v => v.name === btn.dataset.seqOpen);
+          sequenceState = { name: btn.dataset.seqOpen, scope: 'global', context: currentContext, offset: 0 };
+          document.getElementById('sequenceTitle').textContent = (variable ? variable.displayName : sequenceState.name) + ' 的元素（只读）';
+          overlay.hidden = false; requestSequence(Number(btn.dataset.offset));
+        }));
 
         // Watches
         const watches = Array.isArray(snap.watches) ? snap.watches : [];
@@ -1012,7 +1041,7 @@ function getDashboardHtml(options = {}) {
           el.watchesContainer.querySelectorAll('[data-seq-open]').forEach(btn => btn.addEventListener('click', () => {
             if (!currentContext) return;
             sequenceState = { name: btn.dataset.seqOpen, context: currentContext, offset: 0 };
-            document.getElementById('sequenceTitle').textContent = sequenceState.name + ' 的元素';
+            document.getElementById('sequenceTitle').textContent = (btn.dataset.seqLabel || sequenceState.name) + ' 的元素';
             overlay.hidden = false; requestSequence(Number(btn.dataset.offset));
           }));
           el.watchesContainer.querySelectorAll('[data-seq-index]').forEach(btn => btn.addEventListener('click', () => {
@@ -1125,7 +1154,7 @@ function getDashboardHtml(options = {}) {
           renderSnapshot(msg.snapshot);
         } else if (msg.type === 'sequencePage' && sequenceState && msg.requestId === sequenceRequest && sameContext(sequenceState.context, currentContext)) {
           const page = msg.page;
-          sequenceMessage.textContent = page.isChar ? '按字节索引；UTF-8 多字节字符会显示为多个字节。右击可插入或删除（仅支持 string 和 vector）。' : ((page.vectorOps || page.stringOps) ? '左键修改，右键删除或在两侧插入。' : '点击元素修改。');
+          sequenceMessage.textContent = sequenceState.scope === 'global' ? '只读；字符类型按字节索引。' : page.isChar ? '按字节索引；UTF-8 多字节字符会显示为多个字节。右击可插入或删除（仅支持 string 和 vector）。' : ((page.vectorOps || page.stringOps) ? '左键修改，右键删除或在两侧插入。' : '点击元素修改。');
           document.getElementById('sequenceRange').textContent = page.length ? (page.offset + 1) + '–' + (page.offset + page.items.length) + ' / ' + page.length : '空容器';
           prev.disabled = page.offset === 0; next.disabled = page.offset + page.items.length >= page.length;
           sequenceCells.innerHTML = page.items.map(item => '<button class="array-cell" data-index="' + item.index + '" data-value="' + escapeHtml(item.editValue) + '"' + ((page.vectorOps || page.stringOps) ? ' data-vector-index="' + item.index + '" data-vector-name="' + escapeHtml(page.name) + '" data-vector-char="' + (page.isChar ? '1' : '0') + '" title="右击：删除或插入"' : '') + (!page.editable && !(page.vectorOps || page.stringOps) ? ' disabled' : '') + '><span class="array-idx">[' + item.index + ']</span><span class="array-v">' + escapeHtml(item.value) + '</span></button>').join('');

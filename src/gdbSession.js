@@ -93,6 +93,10 @@ class GDBSession extends EventEmitter {
     // State caches for sidebar snapshot
     this.stack = [];
     this.locals = [];
+    this.globals = [];
+    this._globalSymbols = null;
+    this.globalsInfo = '';
+    this.prevGlobalValues = new Map();
     this.prevLocalValues = new Map();
     this.watches = []; // [{ id, expr, value, type, kind, elements, error }]
     this.breakpoints = new Map(); // key: `${normPath}:${line}` -> { id, gdbNumber, file, line, enabled, condition, hitCount }
@@ -136,6 +140,10 @@ class GDBSession extends EventEmitter {
     this.stdoutReadOffset = 0;
     this._outputLimitReached = false;
     this.prevLocalValues.clear();
+    this.prevGlobalValues.clear();
+    this._globalSymbols = null;
+    this.globals = [];
+    this.globalsInfo = '';
     this.currentFrame = 0;
     this.inferiorPid = null;
     this.stack = [];
@@ -844,7 +852,7 @@ class GDBSession extends EventEmitter {
 
   async _getContainerLength(name, isVector) {
     // Only simple local names are admitted into these GDB expressions.
-    if (!/^[a-zA-Z_]\w*$/.test(name)) throw new Error('无法验证数组边界');
+    if (!/^[a-zA-Z_]\w*$/.test(name) && !(this._globalSymbols || []).some(v => v.expression === name)) throw new Error('无法验证数组边界');
     const expression = isVector
       ? `(long long)(${name}._M_impl._M_finish - ${name}._M_impl._M_start)`
       : `(unsigned long)(sizeof(${name}) / sizeof(${name}[0]))`;
@@ -901,24 +909,24 @@ class GDBSession extends EventEmitter {
     return { index, value: display, editValue: printable && byte !== 32 ? display : `0x${byte.toString(16).padStart(2, '0')}` };
   }
 
-  async _describeSequence(formatted, rawType) {
+  async _describeSequence(formatted, rawType, expression = formatted.name, readOnly = false) {
     const kind = this._sequenceKind(formatted, rawType);
     if (!kind) return formatted;
     try {
-      const length = await this._sequenceLength(formatted.name, kind);
+      const length = await this._sequenceLength(expression, kind);
       const isChar = kind === 'string' || kind === 'chars' || (kind === 'vector' && /vector\s*<\s*(?:signed |unsigned )?char\b/.test(rawType));
       const isStringElement = kind === 'vector' && this._vectorElementType(rawType) === 'string';
-      const previewCount = Math.min(length, Math.max(1, Math.min(this.maxArrayPreview, 32)));
+      const previewCount = Math.min(length, Math.max(1, Math.min(this.maxArrayPreview, readOnly ? 8 : 32)));
       let items;
       if (isChar || isStringElement) {
         items = [];
-        for (let i = 0; i < previewCount; i++) items.push(await this._readSequenceItem(formatted.name, kind, i, isChar, isStringElement));
+        for (let i = 0; i < previewCount; i++) items.push(await this._readSequenceItem(expression, kind, i, isChar, isStringElement));
       } else {
         items = (formatted.elements || []).slice(0, previewCount).map((value, index) => ({ index, value, editValue: value }));
       }
       // If GDB returned a shortened preview, never claim it is complete.
       const sequence = { kind, length, isChar, items, truncated: items.length < length,
-        editable: !/(?:^|\s)const(?:\s|$)/.test(rawType) };
+        editable: !readOnly && !/(?:^|\s)const(?:\s|$)/.test(rawType) };
       if (isStringElement) sequence.elementEditable = false;
       if (kind === 'vector') sequence.vectorOps = sequence.editable && !!this._vectorElementType(rawType);
       if (kind === 'string') sequence.stringOps = sequence.editable && rawType.trim() === 'std::string';
@@ -1042,15 +1050,18 @@ class GDBSession extends EventEmitter {
     }
   }
 
-  async getSequencePage(name, offset, pageSize, context) {
+  async getSequencePage(name, offset, pageSize, context, scope = 'local') {
     await this._waitPendingRefresh();
     if (this._vectorMutation) throw new Error('vector 操作正在进行中');
     this._assertPauseContext(context);
     if (!/^[A-Za-z_]\w*$/.test(name || '')) throw new Error('只能查看当前栈帧中的局部变量');
-    const variable = this.locals.find(v => v.name === name);
+    if (scope !== 'local' && scope !== 'global') throw new Error('变量作用域无效');
+    const variable = (scope === 'global' ? this.globals : this.locals).find(v => v.name === name);
     if (!variable || !variable.sequence) throw new Error('该变量无法安全分页查看');
+    const expr = scope === 'global' ? variable.expression : name;
+    if (scope === 'global' && !(this._globalSymbols || []).some(v => v.id === name && v.expression === expr)) throw new Error('全局变量不可用');
     const seq = variable.sequence;
-    const length = await this._sequenceLength(name, seq.kind);
+    const length = await this._sequenceLength(expr, seq.kind);
     this._assertPauseContext(context);
     const start = Number(offset);
     const size = Number(pageSize);
@@ -1058,7 +1069,7 @@ class GDBSession extends EventEmitter {
     const items = [];
     for (let i = start; i < Math.min(length, start + size); i++) {
       this._assertPauseContext(context);
-      items.push(await this._readSequenceItem(name, seq.kind, i, seq.isChar, this._vectorElementType(variable.type) === 'string'));
+      items.push(await this._readSequenceItem(expr, seq.kind, i, seq.isChar, this._vectorElementType(variable.type) === 'string'));
     }
     this._assertPauseContext(context);
     return { name, offset: start, length, items, isChar: seq.isChar, editable: seq.editable && seq.elementEditable !== false, vectorOps: seq.vectorOps === true, stringOps: seq.stringOps === true, context };
@@ -1364,7 +1375,11 @@ class GDBSession extends EventEmitter {
       this.locals = [];
     }
 
-    // 3. Watch expressions
+    // 3. Program globals from the source tree (bounded, read-only).
+    if (this.state !== 'paused' || !this.proc) return;
+    await this._refreshGlobals();
+
+    // 4. Watch expressions
     if (this.state !== 'paused' || !this.proc) return;
     await this._refreshWatches();
 
@@ -1532,6 +1547,80 @@ class GDBSession extends EventEmitter {
       } catch (_) {}
     }
     return formatCppVariable(exprOrName, rawVal, rawType);
+  }
+
+  async _discoverGlobalSymbols() {
+    if (!this.sourceFile) return { symbols: [], info: '无法确定源文件，不能列出全局变量。' };
+    const root = path.dirname(path.resolve(this.sourceFile));
+    const result = await this.sendCommand('-symbol-info-variables --max-results 2000', 8000);
+    const debug = result?.results?.symbols?.debug || [];
+    const groups = Array.isArray(debug) ? debug : [debug];
+    const symbols = [];
+    let enumerated = 0, skippedUnsafe = false;
+    for (const group of groups) {
+      const list = Array.isArray(group.symbols) ? group.symbols : group.symbols ? [group.symbols] : [];
+      enumerated += list.length;
+      if (!group.fullname) continue;
+      const file = path.resolve(group.fullname);
+      const relative = path.relative(root, file);
+      if (relative === '..' || relative.startsWith('..' + path.sep) || path.isAbsolute(relative) || relative.split(path.sep).includes('.dream-debug')) continue;
+      if (file === path.resolve(__dirname, 'vectorHelpers.cpp')) continue;
+      const fileForGdb = file.replace(/\\/g, '/');
+      if (/[\r\n\0'"]/.test(fileForGdb)) { skippedUnsafe = true; continue; }
+      for (const symbol of list) {
+        const name = String(symbol.name || '').replace(/\[abi:[A-Za-z0-9_]+\]/g, '');
+        if (!/^[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*$/.test(name) || /^(?:std|__gnu_cxx)::/.test(name) || name.split('::').some(part => part.startsWith('__'))) continue;
+        const expression = `'${fileForGdb}'::${name}`;
+        if (symbols.some(item => item.expression === expression)) continue;
+        symbols.push({ id: 'global_' + symbols.length, name, file, line: Number(symbol.line) || 0,
+          type: cleanCppType(symbol.type || ''), expression });
+      }
+    }
+    const limited = symbols.length > 100 || enumerated >= 2000;
+    return { symbols: symbols.slice(0, 100), info: limited ? '全局变量数量较多，最多显示 100 项，部分符号可能未列出。' : skippedUnsafe ? '部分路径含特殊字符的符号未列出。' : '' };
+  }
+
+  async _refreshGlobals() {
+    const context = this._pauseContext();
+    const same = () => this.state === 'paused' && !!this.proc && this.sessionId === context.sessionId && this.pauseId === context.pauseId && this.currentFrame === context.frame;
+    try {
+      if (!this._globalSymbols) {
+        const result = await this._discoverGlobalSymbols();
+        if (!same()) return;
+        this._globalSymbols = result.symbols;
+        this.globalsInfo = result.info;
+      }
+      const entries = [];
+      for (const sym of this._globalSymbols) {
+        if (!same()) return;
+        try {
+          const safeExpr = sym.expression.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+          const result = await this.sendCommand(`-data-evaluate-expression "${safeExpr}"`, 2000);
+          if (!same()) return;
+          let formatted = await this._unwrapValueIfNeeded(sym.expression, result?.results?.value ?? '', sym.type);
+          formatted.name = sym.id;
+          formatted = await this._describeSequence(formatted, sym.type, sym.expression, true);
+          if (!same()) return;
+          const old = this.prevGlobalValues.get(sym.expression);
+          const changed = old !== undefined && old !== formatted.displayValue;
+          this.prevGlobalValues.set(sym.expression, formatted.displayValue);
+          entries.push({ ...formatted, name: sym.id, displayName: sym.name, expression: sym.expression,
+            sourceLabel: path.basename(sym.file) + (sym.line ? ':' + sym.line : ''), changed });
+        } catch (_) {
+          if (!same()) return;
+          entries.push({ name: sym.id, displayName: sym.name, expression: sym.expression, type: sym.type,
+            sourceLabel: path.basename(sym.file) + (sym.line ? ':' + sym.line : ''), kind: 'uninitialized',
+            displayValue: '无法读取（可能未初始化或已被优化）', elements: null, changed: false });
+        }
+      }
+      if (same()) this.globals = entries;
+    } catch (_) {
+      if (same()) {
+        this.globals = [];
+        this._globalSymbols = [];
+        this.globalsInfo = '无法列出全局变量；当前 GDB 可能不支持符号查询。';
+      }
+    }
   }
 
   async _refreshWatches() {
@@ -1850,7 +1939,7 @@ class GDBSession extends EventEmitter {
   }
 
   _clearInspectionState() {
-    this.locals = []; this.stack = []; this.registers = []; this.prevLocalValues.clear();
+    this.locals = []; this.globals = []; this.stack = []; this.registers = []; this.prevLocalValues.clear(); this.prevGlobalValues.clear();
     this.watches = this.watches.map(w => ({ ...w, value: '程序已结束', type: '', kind: 'scalar', elements: null, error: null }));
   }
 
@@ -1868,6 +1957,8 @@ class GDBSession extends EventEmitter {
       location: this.stopLocation,
       stack: inactive ? [] : this.stack,
       locals: inactive ? [] : this.locals,
+      globals: inactive ? [] : this.globals,
+      globalsInfo: inactive ? '' : this.globalsInfo,
       watches: inactive ? this.watches.map(w => ({ ...w, value: '程序已结束', type: '', kind: 'scalar', elements: null, error: null })) : this.watches,
       breakpoints: this.getBreakpointsList(),
       registers: inactive ? [] : this.registers,
