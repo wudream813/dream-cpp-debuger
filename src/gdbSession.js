@@ -14,6 +14,8 @@ const { appendBounded, MAX_OUTPUT_CHARS } = require('./outputLimits');
 const { readRegularPrefix } = require('./safeFiles');
 const {
   parseMILine,
+  unescapeMIString,
+  extractStdStringValue,
   extractStdVectorPointers,
   formatCppVariable
 } = require('./miParser');
@@ -23,12 +25,26 @@ const {
  */
 function cleanCppType(rawType) {
   if (!rawType) return '';
-  return String(rawType)
-    .replace(/std::__cxx11::basic_string<char.*?>/g, 'std::string')
-    .replace(/std::basic_string<char.*?>/g, 'std::string')
-    .replace(/,\s*std::allocator<[^<>]+>\s*/g, '')
-    .replace(/\s+>/g, '>')
-    .trim();
+  let text = String(rawType);
+  // basic_string has nested template arguments; a non-greedy regex cuts at
+  // the first inner '>' and can misidentify a vector as a string.
+  const prefix = /std::(?:__cxx11::)?basic_string\s*</g;
+  let match;
+  while ((match = prefix.exec(text))) {
+    let depth = 1, end = prefix.lastIndex;
+    while (end < text.length && depth) {
+      if (text[end] === '<') depth++;
+      if (text[end] === '>') depth--;
+      end++;
+    }
+    if (depth) break;
+    const content = text.slice(prefix.lastIndex, end - 1);
+    if (/^\s*char\s*$/.test(content) || /^\s*char\s*,\s*std::char_traits\s*<\s*char\s*>\s*,\s*std::allocator\s*<\s*char\s*>\s*$/.test(content)) {
+      text = text.slice(0, match.index) + 'std::string' + text.slice(end);
+      prefix.lastIndex = match.index + 'std::string'.length;
+    } else prefix.lastIndex = end;
+  }
+  return text.replace(/,\s*std::allocator<[^<>]+>\s*/g, '').replace(/\s+>/g, '>').trim();
 }
 
 // GDB invokes a shell to process inferior redirection on Unix. Quote every
@@ -68,6 +84,7 @@ class GDBSession extends EventEmitter {
     this.stopLocation = null; // { file, line, func, addr, reason }
     this.inferiorPid = null;
     this._refreshPromise = null;
+    this._vectorMutation = null;
     this._lastStepOrigin = null;
     this._lastStepMode = null;
     this._autoSkipDepth = 0;
@@ -321,6 +338,8 @@ class GDBSession extends EventEmitter {
    * Execute a user console command (CLI) inside GDB.
    */
   async evaluateConsoleCommand(cliCommand) {
+    await this._waitPendingRefresh();
+    if (this._vectorMutation) throw new Error('vector 操作正在进行中');
     if (!cliCommand || !cliCommand.trim()) return '';
     const trimmed = cliCommand.trim();
     this.emit('output', { category: 'console', text: `(gdb) ${trimmed}` });
@@ -378,6 +397,7 @@ class GDBSession extends EventEmitter {
   }
 
   async _waitPendingRefresh() {
+    if (this._vectorMutation) await this._vectorMutation;
     if (this._refreshPromise) {
       try {
         await this._refreshPromise;
@@ -408,6 +428,7 @@ class GDBSession extends EventEmitter {
 
   async continue() {
     await this._waitPendingRefresh();
+    if (this._vectorMutation) return;
     if (this.state !== 'paused') return;
     this._lastStepOrigin = null;
     this._lastStepMode = null;
@@ -424,6 +445,7 @@ class GDBSession extends EventEmitter {
 
   async stepOver() {
     await this._waitPendingRefresh();
+    if (this._vectorMutation) return;
     if (this.state !== 'paused') return;
     this._lastStepOrigin = this.stopLocation
       ? { func: this.stopLocation.func, line: this.stopLocation.line, file: this.stopLocation.file }
@@ -447,6 +469,7 @@ class GDBSession extends EventEmitter {
 
   async stepInto() {
     await this._waitPendingRefresh();
+    if (this._vectorMutation) return;
     if (this.state !== 'paused') return;
     this._lastStepOrigin = this.stopLocation
       ? { func: this.stopLocation.func, line: this.stopLocation.line, file: this.stopLocation.file }
@@ -470,6 +493,7 @@ class GDBSession extends EventEmitter {
 
   async stepOut() {
     await this._waitPendingRefresh();
+    if (this._vectorMutation) return;
     if (this.state !== 'paused') return;
 
     // Ensure frame #0 is selected before executing -exec-finish
@@ -832,8 +856,8 @@ class GDBSession extends EventEmitter {
   _sequenceKind(variable, rawType) {
     const type = String(rawType || variable.type || '');
     if (!/^[A-Za-z_]\w*$/.test(variable.name || '') || variable.kind === 'uninitialized') return null;
-    if (/\b(?:std::)?(?:basic_string<char[^>]*>|string)\b/.test(type) && !/[\[*]/.test(type)) return 'string';
     if (/\bvector\s*</.test(type)) return /vector\s*<\s*bool\b/.test(type) ? null : 'vector';
+    if (/^(?:std::)?(?:basic_string<char[^>]*>|string)$/.test(type.trim())) return 'string';
     if (/^[^\[\]]+\[\d+\]$/.test(type.trim())) return /\bchar\s*\[/.test(type) ? 'chars' : 'array';
     return null;
   }
@@ -846,12 +870,17 @@ class GDBSession extends EventEmitter {
     return Number(value);
   }
 
-  async _readSequenceItem(name, kind, index, isChar) {
+  async _readSequenceItem(name, kind, index, isChar, isStringElement = false) {
     let expression = kind === 'vector' ? `*(${name}._M_impl._M_start + ${index})` :
       kind === 'string' ? `${name}._M_dataplus._M_p[${index}]` : `${name}[${index}]`;
     if (isChar) expression = `(unsigned char)(${expression})`;
     const res = await this.sendCommand(`-data-evaluate-expression "${expression}"`);
     const value = String(res?.results?.value ?? '');
+    if (isStringElement) {
+      const extracted = extractStdStringValue(value);
+      const display = extracted && extracted !== '__UNINITIALIZED__' ? JSON.stringify(unescapeMIString(extracted.slice(1, -1))) : value;
+      return { index, value: display, editValue: display };
+    }
     if (!isChar) return { index, value, editValue: value };
     const m = value.match(/^\s*(\d+)/);
     if (!m || Number(m[1]) > 255) throw new Error('无法读取字符字节');
@@ -867,17 +896,20 @@ class GDBSession extends EventEmitter {
     try {
       const length = await this._sequenceLength(formatted.name, kind);
       const isChar = kind === 'string' || kind === 'chars' || (kind === 'vector' && /vector\s*<\s*(?:signed |unsigned )?char\b/.test(rawType));
+      const isStringElement = kind === 'vector' && this._vectorElementType(rawType) === 'string';
       const previewCount = Math.min(length, Math.max(1, Math.min(this.maxArrayPreview, 32)));
       let items;
-      if (isChar) {
+      if (isChar || isStringElement) {
         items = [];
-        for (let i = 0; i < previewCount; i++) items.push(await this._readSequenceItem(formatted.name, kind, i, true));
+        for (let i = 0; i < previewCount; i++) items.push(await this._readSequenceItem(formatted.name, kind, i, isChar, isStringElement));
       } else {
         items = (formatted.elements || []).slice(0, previewCount).map((value, index) => ({ index, value, editValue: value }));
       }
       // If GDB returned a shortened preview, never claim it is complete.
       const sequence = { kind, length, isChar, items, truncated: items.length < length,
         editable: !/(?:^|\s)const(?:\s|$)/.test(rawType) };
+      if (isStringElement) sequence.elementEditable = false;
+      if (kind === 'vector') sequence.vectorOps = sequence.editable && !!this._vectorElementType(rawType);
       if (kind !== 'string' && kind !== 'chars') {
         const prefix = kind === 'vector' ? `vector[${length}]` : `[${length}]`;
         formatted = { ...formatted, kind: 'array', elements: items.map(item => item.value),
@@ -894,8 +926,95 @@ class GDBSession extends EventEmitter {
     }
   }
 
+  _vectorElementType(type) {
+    // Exact type whitelist: the helper casts to std::vector<T, std::allocator<T>>.
+    // Never cast custom allocators, references, nested containers or objects.
+    const match = String(type || '').trim().match(/^std::vector\s*<\s*([^<>]+?)\s*>$/);
+    if (!match) return null;
+    const element = match[1].replace(/\s+/g, ' ').trim();
+    const types = {
+      'char': 'char', 'signed char': 'schar', 'unsigned char': 'uchar',
+      'short': 'short', 'short int': 'short', 'unsigned short': 'ushort', 'unsigned short int': 'ushort',
+      'int': 'int', 'unsigned': 'uint', 'unsigned int': 'uint', 'long': 'long', 'long int': 'long',
+      'unsigned long': 'ulong', 'unsigned long int': 'ulong', 'long long': 'llong', 'long long int': 'llong',
+      'unsigned long long': 'ullong', 'unsigned long long int': 'ullong',
+      'float': 'float', 'double': 'double', 'std::string': 'string'
+    };
+    return Object.prototype.hasOwnProperty.call(types, element) ? types[element] : null;
+  }
+
+  async insertVectorElement(name, index, rawValue, context) {
+    await this._waitPendingRefresh();
+    if (this._vectorMutation) throw new Error('vector 操作正在进行中');
+    this._assertPauseContext(context);
+    if (!/^[A-Za-z_]\w*$/.test(name || '')) throw new Error('只能修改当前栈帧中的局部变量');
+    const variable = this.locals.find(v => v.name === name);
+    const type = variable && variable.sequence && variable.sequence.editable && variable.sequence.kind === 'vector'
+      ? this._vectorElementType(variable.type) : null;
+    if (!type) throw new Error('此 vector 类型不支持插入：仅支持默认分配器的基本数值类型和 std::string');
+    const append = index === null;
+    let idx = append ? null : Number(index);
+    if (!append && (!Number.isSafeInteger(idx) || idx < 0)) throw new Error('插入位置无效');
+    const value = String(rawValue ?? '');
+    let argument;
+    if (type === 'string') {
+      const bytes = Buffer.from(value, 'utf8');
+      if (bytes.length > 4096) throw new Error('字符串不能超过 4096 字节');
+      // Octal escapes avoid GDB command injection and preserve the exact UTF-8 bytes.
+      const literal = Array.from(bytes, byte => '\\' + byte.toString(8).padStart(3, '0')).join('');
+      argument = `"${literal}", ${bytes.length}`;
+    } else if (['char', 'schar', 'uchar'].includes(type)) {
+      argument = String(this._parseCharacterByte(value));
+    } else if (type === 'float' || type === 'double') {
+      const trimmed = value.trim();
+      if (!/^[+-]?(?:(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)[fF]?$/.test(trimmed)) throw new Error('请输入十进制数值');
+      argument = trimmed;
+    } else {
+      const trimmed = value.trim();
+      if (!/^[+-]?(?:0[xX][0-9a-fA-F]+|[0-9]+)(?:[uU](?:ll|LL|l|L)?|(?:ll|LL|l|L)[uU]?)?$/.test(trimmed)) throw new Error('请输入整数值');
+      argument = trimmed;
+    }
+    let release;
+    this._vectorMutation = new Promise(resolve => { release = resolve; });
+    this._emitSnapshot();
+    try {
+      const length = await this._getContainerLength(name, true);
+      this._assertPauseContext(context);
+      if (append) idx = length;
+      if (idx > length) throw new Error(`插入位置越界（有效范围 0–${length}）`);
+      // Reject known ABI/layout mismatches before casting to the helper's vector type.
+      // This is particularly important for old vs new libstdc++ std::string ABI.
+      const check = `(sizeof(${name}) == dream_debug_vector_size_${type}) && (sizeof(*${name}._M_impl._M_start) == dream_debug_element_size_${type})`;
+      const layout = await this.sendCommand(`-data-evaluate-expression "${check}"`).catch(err => { throw new Error(`无法验证 vector 辅助代码的 ABI：${err.message}`); });
+      this._assertPauseContext(context);
+      if (!/^(?:true|1)$/.test(String(layout?.results?.value ?? ''))) throw new Error('vector 与调试助手的 ABI 布局不匹配，已拒绝插入');
+      const expression = `dream_debug_vector_insert_${type}((void*)&${name}, ${idx}, ${argument})`;
+      const escaped = expression.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+      let result;
+      try { result = await this.sendCommand(`-data-evaluate-expression "${escaped}"`, 15000); }
+      catch (err) {
+        if (/命令超时/.test(err.message)) {
+          // The call may still be executing: do not resume against unknown state.
+          await this.stop();
+          throw new Error('插入调用超时，调试会话已停止；结果不确定');
+        }
+        throw new Error(`GDB 无法调用插入助手（可能不支持目标函数调用）：${err.message}`);
+      }
+      this._assertPauseContext(context);
+      const code = String(result?.results?.value ?? '');
+      if (code !== '0') throw new Error(code === '-2' ? '插入位置越界' : code === '-3' ? '当前编译设置不支持安全插入' : `插入失败（代码 ${code}）`);
+      await this.refreshState();
+      this._assertPauseContext(context);
+    } finally {
+      this._vectorMutation = null;
+      release();
+      this._emitSnapshot();
+    }
+  }
+
   async getSequencePage(name, offset, pageSize, context) {
     await this._waitPendingRefresh();
+    if (this._vectorMutation) throw new Error('vector 操作正在进行中');
     this._assertPauseContext(context);
     if (!/^[A-Za-z_]\w*$/.test(name || '')) throw new Error('只能查看当前栈帧中的局部变量');
     const variable = this.locals.find(v => v.name === name);
@@ -909,10 +1028,10 @@ class GDBSession extends EventEmitter {
     const items = [];
     for (let i = start; i < Math.min(length, start + size); i++) {
       this._assertPauseContext(context);
-      items.push(await this._readSequenceItem(name, seq.kind, i, seq.isChar));
+      items.push(await this._readSequenceItem(name, seq.kind, i, seq.isChar, this._vectorElementType(variable.type) === 'string'));
     }
     this._assertPauseContext(context);
-    return { name, offset: start, length, items, isChar: seq.isChar, editable: seq.editable, context };
+    return { name, offset: start, length, items, isChar: seq.isChar, editable: seq.editable && seq.elementEditable !== false, context };
   }
 
   _parseCharacterByte(input) {
@@ -928,9 +1047,10 @@ class GDBSession extends EventEmitter {
 
   async setSequenceElement(name, index, value, context) {
     await this._waitPendingRefresh();
+    if (this._vectorMutation) throw new Error('vector 操作正在进行中');
     this._assertPauseContext(context);
     const variable = this.locals.find(v => v.name === name);
-    if (!variable || !variable.sequence || !variable.sequence.editable) throw new Error('变量不可修改');
+    if (!variable || !variable.sequence || !variable.sequence.editable || variable.sequence.elementEditable === false) throw new Error('变量不可逐项修改');
     const seq = variable.sequence;
     const idx = Number(index);
     if (!Number.isSafeInteger(idx) || idx < 0) throw new Error('索引无效');
@@ -952,6 +1072,8 @@ class GDBSession extends EventEmitter {
    * Modify a local variable, std::string, std::vector, array, or element value during pause.
    */
   async setVariableValue(name, newValue) {
+    await this._waitPendingRefresh();
+    if (this._vectorMutation) throw new Error('vector 操作正在进行中');
     if (this.state !== 'paused') return false;
     const cleanName = String(name || '').trim();
     const rawInput = String(newValue ?? '').trim();
@@ -988,7 +1110,7 @@ class GDBSession extends EventEmitter {
       const targetVar = this.locals.find((v) => v.name === cleanName);
       if (targetVar?.kind === 'uninitialized') throw new Error('变量尚未初始化');
       const isStdString =
-        targetVar &&
+        targetVar && !/\bvector\s*</.test(targetVar.type) &&
         (targetVar.type.includes('string') ||
           (targetVar.raw && targetVar.raw.includes('_M_dataplus')) ||
           (targetVar.kind === 'string' && !targetVar.type.includes('*') && !targetVar.type.includes('[')));
@@ -1028,7 +1150,7 @@ class GDBSession extends EventEmitter {
 
       // 2. Handle whole std::vector or C array assignment (e.g. `{1, 2, 3}` or `vector[3] { 1, 2, 3 }`)
       if (targetVar && targetVar.kind === 'array') {
-        if (!targetVar.sequence || targetVar.sequence.truncated) throw new Error('长数组或无法确认长度的数组不可整体修改，请逐项修改');
+        if (!targetVar.sequence || targetVar.sequence.truncated || targetVar.sequence.elementEditable === false) throw new Error('长数组或无法确认长度的数组不可整体修改，请逐项修改');
         if (rawInput.includes('...') || rawInput.includes('…')) throw new Error('省略的数组不可整体修改，请逐项修改');
         const stripped = rawInput
           .replace(/^(?:std::)?vector\[\d+\]\s*/i, '')
@@ -1070,6 +1192,8 @@ class GDBSession extends EventEmitter {
    * Select active stack frame and refresh variables.
    */
   async selectFrame(frameLevel) {
+    await this._waitPendingRefresh();
+    if (this._vectorMutation) throw new Error('vector 操作正在进行中');
     if (this.state !== 'paused') return;
     this.pauseId++;
     this.currentFrame = Number(frameLevel) || 0;
@@ -1354,6 +1478,9 @@ class GDBSession extends EventEmitter {
             elements: null,
             raw: rawVal
           };
+        }
+        if (this._vectorElementType(rawType) === 'string') {
+          return { name: exprOrName, type: rawType, kind: 'array', displayValue: `vector[${totalLen}]`, elements: [], raw: rawVal };
         }
         const previewCount = Math.min(totalLen, this.maxArrayPreview);
         if (previewCount > 0) {
@@ -1682,6 +1809,7 @@ class GDBSession extends EventEmitter {
     return {
       sessionId: this.sessionId,
       pauseId: this.pauseId,
+      vectorMutationBusy: !!this._vectorMutation,
       state: this.state,
       executable: this.executable,
       sourceFile: this.sourceFile,

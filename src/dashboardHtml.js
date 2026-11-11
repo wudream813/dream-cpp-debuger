@@ -819,7 +819,7 @@ function getDashboardHtml(options = {}) {
         const seq = v.sequence;
         if (seq) {
           const cells = seq.items.map(item =>
-            '<button class="array-cell" data-seq-index="' + item.index + '" data-seq-name="' + escapeHtml(varBaseName) + '" data-cur-val="' + escapeHtml(item.editValue) + '" data-char="' + (seq.isChar ? '1' : '0') + '"' + (!seq.editable ? ' disabled' : '') + '>' +
+            '<button class="array-cell" data-seq-index="' + item.index + '" data-seq-name="' + escapeHtml(varBaseName) + '" data-cur-val="' + escapeHtml(item.editValue) + '" data-char="' + (seq.isChar ? '1' : '0') + '"' + (!seq.editable || seq.elementEditable === false ? ' disabled' : '') + '>' +
               '<span class="array-idx">[' + item.index + ']</span><span class="array-v">' + escapeHtml(item.value) + '</span></button>'
           ).join('');
           const more = seq.truncated ? '<button class="array-cell" data-seq-open="' + escapeHtml(varBaseName) + '" data-offset="' + seq.items.length + '" title="分页查看剩余元素">…<span class="array-idx">查看更多</span></button>' : '';
@@ -828,9 +828,10 @@ function getDashboardHtml(options = {}) {
           arrayHtml = '<div class="array-strip">' + v.elements.map((item, idx) => '<div class="array-cell"><span class="array-idx">[' + idx + ']</span><span class="array-v">' + escapeHtml(item) + '</span></div>').join('') + '</div>';
         }
         const editableVal = Array.isArray(v.elements) && v.kind === 'array' ? '{ ' + v.elements.join(', ') + ' }' : String(v.displayValue ?? v.value ?? '');
+        const vectorButtons = seq && seq.vectorOps ? '<button class="icon-action" data-vector-mode="append" data-vector-name="' + escapeHtml(varBaseName) + '" data-vector-hint="' + escapeHtml(seq.isChar ? '单字节字符或 0x00–0xFF' : '输入元素值') + '"' + (currentBusy ? ' disabled' : '') + '>＋ push_back</button><button class="icon-action" data-vector-mode="insert" data-vector-name="' + escapeHtml(varBaseName) + '" data-vector-hint="' + escapeHtml(seq.isChar ? '单字节字符或 0x00–0xFF' : '输入元素值') + '"' + (currentBusy ? ' disabled' : '') + '>＋ insert</button>' : '';
         const actionBtn = options.isWatch
           ? '<button class="icon-action" data-remove-watch="' + escapeHtml(v.id || v.expr) + '" title="移除监视">✕ 移除</button>'
-          : v.kind === 'uninitialized' || (v.kind === 'array' && (!seq || seq.truncated)) || (seq && (!seq.editable || seq.kind === 'chars' || seq.fullValueUnavailable))
+          : v.kind === 'uninitialized' || (v.kind === 'array' && (!seq || seq.truncated)) || (seq && (!seq.editable || seq.elementEditable === false || seq.kind === 'chars' || seq.fullValueUnavailable))
           ? ''
           : '<button class="icon-action" data-edit-var="' + escapeHtml(varBaseName) + '" data-cur-val="' + escapeHtml(editableVal) + '" title="修改变量值">✎ 修改值</button>';
 
@@ -844,7 +845,7 @@ function getDashboardHtml(options = {}) {
               '</div>' +
               '<div class="var-right">' +
                 '<span class="var-val ' + valClass + '">' + escapeHtml(v.displayValue ?? v.value) + '</span>' +
-                actionBtn +
+                vectorButtons + actionBtn +
               '</div>' +
             '</div>' +
             arrayHtml +
@@ -852,7 +853,7 @@ function getDashboardHtml(options = {}) {
         );
       }
 
-      let currentContext = null, sequenceState = null, sequenceRequest = 0;
+      let currentContext = null, sequenceState = null, sequenceRequest = 0, currentBusy = false;
       const overlay = document.getElementById('sequenceOverlay');
       const sequenceMessage = document.getElementById('sequenceMessage');
       const sequenceCells = document.getElementById('sequenceCells');
@@ -877,6 +878,7 @@ function getDashboardHtml(options = {}) {
         if (!snap) return;
         const state = snap.state || 'idle';
         const isPaused = state === 'paused';
+        currentBusy = !!snap.vectorMutationBusy;
         const nextContext = isPaused ? { sessionId: snap.sessionId, pauseId: snap.pauseId, frame: snap.currentFrame } : null;
         if (sequenceState && !sameContext(sequenceState.context, nextContext)) closeSequence();
         currentContext = nextContext;
@@ -909,10 +911,10 @@ function getDashboardHtml(options = {}) {
           el.locationBanner.classList.remove('visible');
         }
 
-        el.btnContinue.disabled = !isPaused;
-        el.btnStepOver.disabled = !isPaused;
-        el.btnStepInto.disabled = !isPaused;
-        el.btnStepOut.disabled = !isPaused;
+        el.btnContinue.disabled = !isPaused || currentBusy;
+        el.btnStepOver.disabled = !isPaused || currentBusy;
+        el.btnStepInto.disabled = !isPaused || currentBusy;
+        el.btnStepOut.disabled = !isPaused || currentBusy;
         el.btnStop.disabled = !isActive;
 
         // Locals
@@ -924,6 +926,9 @@ function getDashboardHtml(options = {}) {
           '</div>';
         } else {
           el.localsContainer.innerHTML = locals.map((v) => renderVariableCard(v, { isWatch: false })).join('');
+          el.localsContainer.querySelectorAll('[data-vector-mode]').forEach(btn => btn.addEventListener('click', () => {
+            if (currentContext && !currentBusy) vscode.postMessage({ type: 'promptVectorInsert', name: btn.dataset.vectorName, mode: btn.dataset.vectorMode, valueHint: btn.dataset.vectorHint, context: currentContext, requestId: sequenceRequest });
+          }));
           el.localsContainer.querySelectorAll('[data-seq-open]').forEach(btn => btn.addEventListener('click', () => {
             if (!currentContext) return;
             sequenceState = { name: btn.dataset.seqOpen, context: currentContext, offset: 0 };
@@ -961,6 +966,9 @@ function getDashboardHtml(options = {}) {
               sequence: (locals.find(v => v.name === w.expr) || {}).sequence
             }, { isWatch: true })
           ).join('');
+          el.watchesContainer.querySelectorAll('[data-vector-mode]').forEach(btn => btn.addEventListener('click', () => {
+            if (currentContext && !currentBusy) vscode.postMessage({ type: 'promptVectorInsert', name: btn.dataset.vectorName, mode: btn.dataset.vectorMode, valueHint: btn.dataset.vectorHint, context: currentContext, requestId: sequenceRequest });
+          }));
           el.watchesContainer.querySelectorAll('[data-seq-open]').forEach(btn => btn.addEventListener('click', () => {
             if (!currentContext) return;
             sequenceState = { name: btn.dataset.seqOpen, context: currentContext, offset: 0 };

@@ -349,6 +349,7 @@ class DreamDebugController {
     this.outputChannel.appendLine(`[Dream Compiler] 正在编译: ${sourceFile}`);
 
     const compileResult = await compileSourceFile(sourceFile, {
+      vectorHelpers: true,
       compilerPath: this.config.get('compilerPath', 'g++'),
       compileFlags: this.config.get('compileFlags', ['-g', '-O0', '-std=c++17'])
     });
@@ -775,6 +776,36 @@ class DreamDebugController {
         });
         if (cond !== undefined) {
           await this.session.setBreakpointCondition(msg.file, msg.line, cond);
+        }
+        break;
+      }
+      case 'promptVectorInsert': {
+        const context = msg.context;
+        try {
+          this.session._assertPauseContext(context);
+          if (msg.mode !== 'append' && msg.mode !== 'insert') throw new Error('操作无效');
+          let index = null;
+          if (msg.mode === 'insert') {
+            const input = await vscode.window.showInputBox({
+              prompt: `在 ${msg.name} 的哪个索引之前插入？可填写当前长度以追加`,
+              placeHolder: '例如 0',
+              validateInput: v => /^\d+$/.test(v) && Number.isSafeInteger(Number(v)) ? null : '请输入非负整数索引'
+            });
+            if (input === undefined) break;
+            if (!/^\d+$/.test(input) || !Number.isSafeInteger(Number(input))) throw new Error('插入位置无效');
+            index = Number(input);
+          }
+          this.session._assertPauseContext(context);
+          const value = await vscode.window.showInputBox({
+            prompt: `${msg.mode === 'append' ? '追加到' : '插入到'} ${msg.name} 的元素值`,
+            placeHolder: msg.valueHint || '例如 42'
+          });
+          if (value === undefined) break;
+          await this.session.insertVectorElement(msg.name, index, value, context);
+          this.postToAllViews({ type: 'sequenceEdited', requestId: msg.requestId });
+        } catch (err) {
+          this.postToAllViews({ type: 'sequenceError', requestId: msg.requestId, message: err.message });
+          vscode.window.showErrorMessage(`vector 操作失败：${err.message}`);
         }
         break;
       }

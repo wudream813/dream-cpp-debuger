@@ -93,7 +93,9 @@ function compileSourceFile(sourceFile, options = {}) {
     const extSuffix = process.platform === 'win32' ? '.exe' : '.debug.out';
     const outputBinary = path.join(outDir, `program${extSuffix}`);
 
-    const args = [...flags, absSource, '-o', outputBinary];
+    // Add typed mutation helpers only for C++ debug builds explicitly requesting them.
+    const helper = options.vectorHelpers && ext !== '.c' ? [path.join(__dirname, 'vectorHelpers.cpp')] : [];
+    const args = [...flags, absSource, ...helper, '-o', outputBinary];
     const commandLine = `${compiler} ${args.map((a) => (a.includes(' ') ? `"${a}"` : a)).join(' ')}`;
 
     let stdout = '';
