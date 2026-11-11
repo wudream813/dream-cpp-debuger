@@ -297,6 +297,8 @@ function getDashboardHtml(options = {}) {
     .two-col-row .section-card {
       margin-bottom: 0;
     }
+    .two-col-row.beginner-layout { grid-template-columns: 1fr; }
+    .section-card[hidden] { display: none; }
 
     .section-header {
       display: flex;
@@ -624,19 +626,19 @@ function getDashboardHtml(options = {}) {
     <div class="transport-grid">
       <button id="btnContinue" class="ctrl-btn continue-btn" disabled title="继续运行 Continue (F5)">
         <svg viewBox="0 0 16 16" fill="currentColor"><path d="M4 3v10l9-5-9-5z"/></svg>
-        <span>继续 F5</span>
+        <span id="labelContinue">继续 F5</span>
       </button>
       <button id="btnStepOver" class="ctrl-btn" disabled title="单步跳过 Step Over (F10)">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 10a5 5 0 0 1 10 0"/><polyline points="11 7 13.5 10 10.5 11"/><circle cx="8" cy="12" r="1.5" fill="currentColor"/></svg>
-        <span>跳过 F10</span>
+        <span id="labelStepOver">跳过 F10</span>
       </button>
       <button id="btnStepInto" class="ctrl-btn" disabled title="单步进入 Step Into (F11)">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><line x1="8" y1="2" x2="8" y2="10"/><polyline points="5 7.5 8 10.5 11 7.5"/><circle cx="8" cy="13.5" r="1.5" fill="currentColor"/></svg>
-        <span>进入 F11</span>
+        <span id="labelStepInto">进入 F11</span>
       </button>
       <button id="btnStepOut" class="ctrl-btn" disabled title="单步跳出 Step Out (Shift+F11)">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><line x1="8" y1="10" x2="8" y2="2"/><polyline points="5 5 8 2 11 5"/><circle cx="8" cy="13.5" r="1.5" fill="currentColor"/></svg>
-        <span>跳出</span>
+        <span id="labelStepOut">跳出</span>
       </button>
       <button id="btnRestart" class="ctrl-btn" title="重新编译并启动 GDB 调试">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M13 8a5 5 0 1 1-1.4-3.5"/><polyline points="13 2 13 5.5 9.5 5.5"/></svg>
@@ -691,7 +693,7 @@ function getDashboardHtml(options = {}) {
   </div>
 
   <!-- 3. Call Stack & Breakpoints (Side-by-Side on wide panes) -->
-  <div class="two-col-row" style="margin-bottom: 14px;">
+  <div id="stackBreakpointRow" class="two-col-row" style="margin-bottom: 14px;">
     <div class="section-card">
       <div class="section-header">
         <span>📚 调用栈 (Call Stack)</span>
@@ -704,7 +706,7 @@ function getDashboardHtml(options = {}) {
       </div>
     </div>
 
-    <div class="section-card">
+    <div id="breakpointCard" class="section-card">
       <div class="section-header">
         <span>🎯 断点管理 (支持条件断点)</span>
         <span id="bpCount" class="badge-count">0 个</span>
@@ -718,7 +720,7 @@ function getDashboardHtml(options = {}) {
   </div>
 
   <!-- 4. GDB Console & CPU Registers -->
-  <div class="section-card">
+  <div id="advancedCard" class="section-card">
     <div class="section-header">
       <span>⌨️ GDB 交互命令台 & CPU 寄存器</span>
       <span class="badge-count">GDB/MI2</span>
@@ -758,6 +760,13 @@ function getDashboardHtml(options = {}) {
         statusPill: document.getElementById('statusPill'),
         locationBanner: document.getElementById('locationBanner'),
         locationText: document.getElementById('locationText'),
+        stackBreakpointRow: document.getElementById('stackBreakpointRow'),
+        breakpointCard: document.getElementById('breakpointCard'),
+        advancedCard: document.getElementById('advancedCard'),
+        labelContinue: document.getElementById('labelContinue'),
+        labelStepOver: document.getElementById('labelStepOver'),
+        labelStepInto: document.getElementById('labelStepInto'),
+        labelStepOut: document.getElementById('labelStepOut'),
         btnContinue: document.getElementById('btnContinue'),
         btnStepOver: document.getElementById('btnStepOver'),
         btnStepInto: document.getElementById('btnStepInto'),
@@ -937,6 +946,18 @@ function getDashboardHtml(options = {}) {
         if (!snap) return;
         const state = snap.state || 'idle';
         const isPaused = state === 'paused';
+        const beginner = snap.userMode === 'beginner';
+        el.breakpointCard.hidden = beginner;
+        el.advancedCard.hidden = beginner;
+        el.stackBreakpointRow.classList.toggle('beginner-layout', beginner);
+        el.labelContinue.textContent = beginner ? '运行到下一个断点 F5' : '继续 F5';
+        el.labelStepOver.textContent = beginner ? '执行下一行 F10' : '跳过 F10';
+        el.labelStepInto.textContent = beginner ? '进入函数 F11' : '进入 F11';
+        el.labelStepOut.textContent = beginner ? '运行完当前函数' : '跳出';
+        el.btnContinue.title = beginner ? '继续执行，直到遇到断点或程序结束 (F5)' : '继续运行 Continue (F5)';
+        el.btnStepOver.title = beginner ? '执行当前行；遇到函数调用时不进入函数内部 (F10)' : '单步跳过 Step Over (F10)';
+        el.btnStepInto.title = beginner ? '执行当前行并尽可能进入调用的函数 (F11)' : '单步进入 Step Into (F11)';
+        el.btnStepOut.title = beginner ? '继续执行到当前函数返回，或遇到断点或程序结束 (Shift+F11)' : '单步跳出 Step Out (Shift+F11)';
         currentBusy = !!snap.vectorMutationBusy;
         currentRevision = snap.vectorRevision || 0;
         if (menuState && (currentBusy || menuState.revision !== currentRevision || !sameContext(menuState.context, { sessionId: snap.sessionId, pauseId: snap.pauseId, frame: snap.currentFrame }) || !isPaused)) closeVectorMenu();
@@ -976,7 +997,9 @@ function getDashboardHtml(options = {}) {
         el.btnStepOver.disabled = !isPaused || currentBusy;
         el.btnStepInto.disabled = !isPaused || currentBusy;
         el.btnStepOut.disabled = !isPaused || currentBusy;
-        el.btnStop.disabled = !isActive;
+        el.btnStop.disabled = !isActive && !snap.isCompiling;
+        el.btnRestart.disabled = !!snap.isCompiling;
+        if (snap.isCompiling) el.statusPill.textContent = '正在编译…';
 
         // Locals
         const locals = Array.isArray(snap.locals) ? snap.locals : [];

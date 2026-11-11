@@ -409,6 +409,11 @@ function getSidebarHtml(options = {}) {
       color: var(--output-fg);
     }
 
+    .compile-progress { display: flex; align-items: center; gap: 9px; margin-bottom: 10px; padding: 9px 10px; border-radius: 8px; border: 1px solid var(--vscode-focusBorder, var(--border-strong)); color: var(--fg-main); background: var(--bg-hover); font-weight: 700; }
+    .compile-progress[hidden] { display: none; }
+    .compile-spinner { width: 14px; height: 14px; border: 2px solid var(--border-strong); border-top-color: var(--vscode-focusBorder, var(--accent)); border-radius: 50%; animation: compile-spin 0.8s linear infinite; }
+    @keyframes compile-spin { to { transform: rotate(360deg); } }
+    @media (prefers-reduced-motion: reduce) { .compile-spinner { animation: none; } }
     /* ── Compile Error (CE) vs Warning Banners ── */
     .diag-group-header {
       display: flex;
@@ -450,18 +455,19 @@ function getSidebarHtml(options = {}) {
       <span id="statusPill" class="status-pill">就绪 Ready</span>
     </div>
     <div class="card-body">
+      <div id="compileProgress" class="compile-progress" role="status" aria-live="polite" hidden><span class="compile-spinner" aria-hidden="true"></span><span>正在编译，请稍候…</span></div>
       <div id="compileDiagnostics"></div>
-
+      <div style="display:flex;justify-content:flex-end;margin-bottom:8px;"><button id="btnUserMode" class="small-action" title="切换新手或老手界面">模式：老手</button></div>
       <div class="btn-stack">
         <button id="btnStartDebug" class="btn btn-primary" title="编译并在当前窗格右半边打开 GDB 调试面板 (Ctrl+Shift+F5)">
-          <span>🐞 编译并开始 GDB 调试 (右侧展开)</span>
+          <span id="startDebugLabel">🐞 编译并开始 GDB 调试 (右侧展开)</span>
         </button>
         <div class="btn-row">
           <button id="btnQuickRun" class="btn btn-run" title="快速编译并带入下方 stdin 直接运行">
-            <span>⚡ 编译运行</span>
+            <span id="quickRunLabel">⚡ 编译运行</span>
           </button>
           <button id="btnOpenDashboard" class="btn" title="在当前窗格右半边打开调试工作台页面">
-            <span>🖥 右侧调试台</span>
+            <span id="dashboardLabel">🖥 右侧调试台</span>
           </button>
         </div>
       </div>
@@ -471,7 +477,7 @@ function getSidebarHtml(options = {}) {
   <!-- 2. Standard Input (stdin) Card with 3 Modes: Text / Stream / File -->
   <div class="card">
     <div class="card-header">
-      <span>📥 标准输入 (stdin)</span>
+      <span id="stdinTitle">📥 标准输入 (stdin)</span>
       <button id="btnClearStdin" class="small-action" title="清空当前输入">清空</button>
     </div>
     <div class="card-body">
@@ -518,7 +524,7 @@ function getSidebarHtml(options = {}) {
   <!-- 3. Program Output (stdout / stderr) Card -->
   <div class="card">
     <div class="card-header">
-      <span>📤 程序输出 (stdout / stderr)</span>
+      <span id="outputTitle">📤 程序输出 (stdout / stderr)</span>
       <div style="display:flex;gap:5px;">
         <button id="btnCopyStdout" class="small-action" title="复制输出结果">复制</button>
         <button id="btnClearStdout" class="small-action" title="清空输出">清空</button>
@@ -542,13 +548,20 @@ function getSidebarHtml(options = {}) {
 
       let currentStdinMode = 'text';
       let streamHistoryText = '';
-      let lastRunId = -1;
+      let lastRunId = -1, wasCompiling = false;
 
       const el = {
         statusDot: document.getElementById('statusDot'),
         targetFileName: document.getElementById('targetFileName'),
         statusPill: document.getElementById('statusPill'),
         compileDiagnostics: document.getElementById('compileDiagnostics'),
+        compileProgress: document.getElementById('compileProgress'),
+        btnUserMode: document.getElementById('btnUserMode'),
+        startDebugLabel: document.getElementById('startDebugLabel'),
+        quickRunLabel: document.getElementById('quickRunLabel'),
+        dashboardLabel: document.getElementById('dashboardLabel'),
+        stdinTitle: document.getElementById('stdinTitle'),
+        outputTitle: document.getElementById('outputTitle'),
         btnStartDebug: document.getElementById('btnStartDebug'),
         btnQuickRun: document.getElementById('btnQuickRun'),
         btnOpenDashboard: document.getElementById('btnOpenDashboard'),
@@ -594,6 +607,8 @@ function getSidebarHtml(options = {}) {
           setStdinMode(tab.getAttribute('data-mode'));
         });
       });
+
+      el.btnUserMode.addEventListener('click', () => vscode.postMessage({ type: 'changeUserMode' }));
 
       el.btnStartDebug.addEventListener('click', () => {
         if (currentStdinMode === 'stream') {
@@ -746,10 +761,23 @@ function getSidebarHtml(options = {}) {
         if (!snap) return;
         const state = snap.state || 'idle';
         const isPaused = state === 'paused';
-        const isRunning = state === 'running' || state === 'starting';
+        const isCompiling = !!snap.isCompiling;
+        const isRunning = state === 'running' || state === 'starting' || !!snap.quickRunning;
+        const beginner = snap.userMode === 'beginner';
+        el.btnUserMode.textContent = beginner ? '模式：新手' : '模式：老手';
+        el.startDebugLabel.textContent = beginner ? '🐞 开始调试' : '🐞 编译并开始 GDB 调试 (右侧展开)';
+        el.quickRunLabel.textContent = beginner ? '⚡ 运行程序' : '⚡ 编译运行';
+        el.dashboardLabel.textContent = beginner ? '🖥 打开调试台' : '🖥 右侧调试台';
+        el.stdinTitle.textContent = beginner ? '📥 程序输入' : '📥 标准输入 (stdin)';
+        el.outputTitle.textContent = beginner ? '📤 程序输出' : '📤 程序输出 (stdout / stderr)';
+        el.compileProgress.hidden = !isCompiling;
+        el.btnStartDebug.disabled = isCompiling;
+        el.btnQuickRun.disabled = isCompiling;
+        if (isCompiling && !wasCompiling) el.compileDiagnostics.innerHTML = '';
+        wasCompiling = isCompiling;
 
-        el.statusDot.className = 'brand-dot ' + (isPaused ? 'paused' : isRunning ? 'running' : state === 'error' ? 'error' : '');
-        el.statusPill.className = 'status-pill ' + (isPaused ? 'paused' : isRunning ? 'running' : state === 'error' ? 'error' : '');
+        el.statusDot.className = 'brand-dot ' + (isCompiling ? 'running' : isPaused ? 'paused' : isRunning ? 'running' : state === 'error' ? 'error' : '');
+        el.statusPill.className = 'status-pill ' + (isCompiling ? 'running' : isPaused ? 'paused' : isRunning ? 'running' : state === 'error' ? 'error' : '');
 
         const stateLabels = {
           idle: '就绪 Ready',
@@ -759,7 +787,7 @@ function getSidebarHtml(options = {}) {
           exited: '已结束 Exited',
           error: '异常 Error'
         };
-        el.statusPill.textContent = stateLabels[state] || state;
+        el.statusPill.textContent = isCompiling ? '正在编译…' : (snap.quickRunning ? '运行中' : stateLabels[state] || state);
 
         if (snap.activeFileName || snap.sourceFile) {
           const fname = snap.activeFileName || snap.sourceFile.split(/[\\\\/]/).pop();

@@ -568,6 +568,9 @@ int main() {
   await require('./reset-tests').testResets();
   ok('Sidebar and controller reset history/output across restart and ignore late previous-run output');
 
+  await require('./mode-compile-tests').testModeCompile();
+  ok('Beginner/expert UI, persistent selection and serialized compile progress/cancellation');
+
   console.log(`\n🎉 All ${passed} tests passed!`);
 }
 

@@ -43,6 +43,7 @@ class DreamSidebarProvider {
     });
 
     this.controller.pushSnapshotToWebview();
+    void this.controller.ensureUserMode().catch(err => vscode.window.showErrorMessage(`模式选择失败：${err.message}`));
   }
 
   postMessage(message) {
@@ -62,6 +63,12 @@ class DreamDebugController {
   constructor(context) {
     this.context = context;
     this.config = vscode.workspace.getConfiguration('dreamCppDebug');
+    this.userMode = context.globalState.get('dreamCppDebug.userMode') === 'beginner' ? 'beginner' : 'expert';
+    this.modeWasSelected = ['beginner', 'expert'].includes(context.globalState.get('dreamCppDebug.userMode'));
+    this.modePromptShown = false;
+    this.modePrompt = null;
+    this.compilingRunId = null;
+    this.compileQueue = Promise.resolve();
     this.session = new GDBSession({
       gdbPath: this.config.get('gdbPath', 'gdb'),
       maxArrayPreview: this.config.get('maxArrayPreview', 16)
@@ -118,6 +125,53 @@ class DreamDebugController {
 
     this.sidebarProvider = new DreamSidebarProvider(context, this);
     this._bindSessionEvents();
+  }
+
+  async ensureUserMode() {
+    if (this.modeWasSelected || this.modePromptShown) return;
+    this.modePromptShown = true;
+    await this.chooseUserMode();
+  }
+
+  async chooseUserMode() {
+    if (this.modePrompt) return this.modePrompt;
+    const task = (async () => {
+      const choice = await vscode.window.showQuickPick([
+        { label: '🌱 新手模式', description: '简洁、通俗', detail: '隐藏 GDB 命令、寄存器和断点管理；仍可在编辑器设置断点。', mode: 'beginner' },
+        { label: '🛠 老手模式', description: '完整功能', detail: '保留 GDB 命令、寄存器和断点管理等高级功能。', mode: 'expert' }
+      ], { title: '选择调试界面模式', placeHolder: '以后可在侧栏随时切换；取消时暂用老手模式', ignoreFocusOut: true });
+      if (!choice || !['beginner', 'expert'].includes(choice.mode)) return;
+      this.userMode = choice.mode;
+      this.modeWasSelected = true;
+      try { await this.context.globalState.update('dreamCppDebug.userMode', choice.mode); }
+      catch (_) { vscode.window.showWarningMessage('模式设置未能保存，本次会话仍可使用。'); }
+      this.pushSnapshotToWebview();
+    })();
+    this.modePrompt = task;
+    try { await task; } finally { if (this.modePrompt === task) this.modePrompt = null; }
+  }
+
+  async compileWithProgress(sourceFile, options, runId) {
+    this.compilingRunId = runId;
+    this.statusBarItem.text = '$(sync~spin) 正在编译 C/C++ 源码...';
+    this.pushSnapshotToWebview();
+    // Serialise builds: an obsolete compiler must not overwrite a newer executable.
+    const previous = this.compileQueue || Promise.resolve();
+    const task = previous.catch(() => {}).then(() => {
+      if (runId !== this.runId) return null;
+      return compileSourceFile(sourceFile, options);
+    });
+    this.compileQueue = task.catch(() => {});
+    try { return await task; }
+    finally {
+      if (this.compilingRunId === runId) {
+        this.compilingRunId = null;
+        if (runId === this.runId) {
+          this.updateStatusBar(this.session.state, this.session.stopLocation);
+          this.pushSnapshotToWebview();
+        }
+      }
+    }
   }
 
   /**
@@ -293,6 +347,9 @@ class DreamDebugController {
     snap.stdinFile = this.stdinFile;
     snap.stdinFilePreview = this.stdinFilePreview;
     snap.outputFile = this.outputFile || '';
+    snap.userMode = this.userMode || 'expert';
+    snap.isCompiling = this.compilingRunId === this.runId;
+    snap.quickRunning = this.quickRunId === this.runId && !!this.activeRunProcess && !snap.isCompiling;
     snap.streamHistory = this.streamHistory.slice();
     snap.runId = this.runId;
     this.postToAllViews({
@@ -356,11 +413,11 @@ class DreamDebugController {
     this.statusBarItem.text = '$(sync~spin) 正在编译 C++ 源码...';
     this.outputChannel.appendLine(`[Dream Compiler] 正在编译: ${sourceFile}`);
 
-    const compileResult = await compileSourceFile(sourceFile, {
+    const compileResult = await this.compileWithProgress(sourceFile, {
       vectorHelpers: true,
       compilerPath: this.config.get('compilerPath', 'g++'),
       compileFlags: this.config.get('compileFlags', ['-g', '-O0', '-std=c++17'])
-    });
+    }, runId);
 
     if (runId !== this.runId) return;
     this.applyCompilerDiagnostics(sourceFile, compileResult);
@@ -457,10 +514,10 @@ class DreamDebugController {
     this.resettingRunId = null;
     this.pushSnapshotToWebview();
 
-    const compileResult = await compileSourceFile(sourceFile, {
+    const compileResult = await this.compileWithProgress(sourceFile, {
       compilerPath: this.config.get('compilerPath', 'g++'),
       compileFlags: this.config.get('compileFlags', ['-g', '-O0', '-std=c++17'])
-    });
+    }, runId);
 
     if (runId !== this.runId) return;
     this.applyCompilerDiagnostics(sourceFile, compileResult);
@@ -505,6 +562,7 @@ class DreamDebugController {
         this.activeRunProcess = proc;
         this.activeRunCancel = cancel;
         this.activeRunStream = this.stdinMode === 'stream';
+        this.pushSnapshotToWebview();
       },
       onOutput: (chunk, _outputSoFar, category) => {
         if (runId !== this.runId) return;
@@ -556,10 +614,12 @@ class DreamDebugController {
   }
 
   async stopExecution() {
-    if (this.quickRunId === this.runId) {
+    if (this.quickRunId === this.runId || this.compilingRunId === this.runId) {
       ++this.runId; // invalidate pending compile/start and late output callbacks
       this.quickRunId = null;
+      this.compilingRunId = null;
       this.resettingRunId = null;
+      this.updateStatusBar('idle');
       this.session.programOutput = appendBounded(this.session.programOutput, '\n[已停止]\n');
       this.pushSnapshotToWebview();
     }
@@ -730,6 +790,9 @@ class DreamDebugController {
     if (!msg || !msg.type) return;
 
     switch (msg.type) {
+      case 'changeUserMode':
+        await this.chooseUserMode();
+        break;
       case 'ready':
         this.pushSnapshotToWebview();
         break;
