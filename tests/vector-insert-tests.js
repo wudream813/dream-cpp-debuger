@@ -11,7 +11,7 @@ async function testVectorInsert() {
   fs.writeFileSync(source, [
     '#include <vector>', '#include <string>', '#include <iostream>', 'int main() {',
     'std::vector<int> v;', 'std::vector<double> d{1.5};', 'std::vector<char> c;',
-    'std::vector<std::string> s;', 'int arr[2] = {1,2};',
+    'std::vector<std::string> s;', 'int arr[2] = {1,2}; std::vector<int> large(100, 7);',
     'volatile int marker = 1;', 'std::cout << v.size() << " " << d.size() << " " << c.size() << " " << s.size() << " " << marker;', '}', ''
   ].join('\n'));
   const session = new GDBSession();
@@ -30,6 +30,21 @@ async function testVectorInsert() {
     await session.insertVectorElement('v',4,'44',ctx);
     assert.deepStrictEqual((await session.getSequencePage('v',0,32,ctx)).items.map(x=>x.value),['9','11','22','33','44']);
     assert.deepStrictEqual(session.watches.find(w => w.expr === 'v').elements, ['9','11','22','33','44']);
+    const oldRevision = session._vectorRevision;
+    await session.insertVectorElement('v',2,'',ctx,{delete:true,revision:oldRevision,anchorIndex:2});
+    assert.deepStrictEqual((await session.getSequencePage('v',0,32,ctx)).items.map(x=>x.value),['9','11','33','44']);
+    await assert.rejects(session.insertVectorElement('v',2,'22',ctx,{revision:oldRevision,anchorIndex:2}),/容器内容已变化/);
+    await session.insertVectorElement('v',2,'22',ctx,{revision:session._vectorRevision,anchorIndex:2});
+    await session.insertVectorElement('v',5,'55',ctx,{revision:session._vectorRevision,anchorIndex:4});
+    await session.insertVectorElement('v',5,'',ctx,{delete:true,revision:session._vectorRevision,anchorIndex:5});
+    await assert.rejects(session.insertVectorElement('v',5,'',ctx,{delete:true,revision:session._vectorRevision,anchorIndex:5}),/不存在|越界/);
+    await assert.rejects(session.insertVectorElement('v',0,'1',ctx,{requireEmpty:true,revision:session._vectorRevision}),/不为空/);
+    await session.insertVectorElement('large',80,'88',ctx,{revision:session._vectorRevision,anchorIndex:80});
+    assert.equal((await session.getSequencePage('large',80,1,ctx)).items[0].value,'88');
+    await session.insertVectorElement('large',80,'',ctx,{delete:true,revision:session._vectorRevision,anchorIndex:80});
+    assert.equal((await session.getSequencePage('large',80,1,ctx)).items[0].value,'7');
+    assert.deepStrictEqual(session.watches.find(w => w.expr === 'v').elements, ['9','11','22','33','44']);
+
     await session.insertVectorElement('d',null,'3.25',ctx);
     await session.insertVectorElement('c',null,'Z',ctx);
     await session.insertVectorElement('s',null,'你好 "x"',ctx);
@@ -40,6 +55,9 @@ async function testVectorInsert() {
     assert(session.locals.find(v => v.name === 's').displayValue.includes('你好'));
     await assert.rejects(session.setSequenceElement('s',0,'test',ctx), /不可逐项修改/);
     assert.equal(session.locals.find(v => v.name === 's').sequence.length, 1);
+    await session.insertVectorElement('s',0,'',ctx,{delete:true,revision:session._vectorRevision,anchorIndex:0});
+    assert.equal((await session.getSequencePage('s',0,1,ctx)).length,0);
+    await session.insertVectorElement('s',0,'你好',ctx,{requireEmpty:true,revision:session._vectorRevision});
     await assert.rejects(session.insertVectorElement('v',8,'1',ctx),/越界/);
     await assert.rejects(session.insertVectorElement('v',0,'1); quit',ctx),/整数/);
     await assert.rejects(session.insertVectorElement('arr',0,'1',ctx),/不支持/);

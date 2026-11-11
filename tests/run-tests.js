@@ -542,7 +542,7 @@ int main() {
   ok('Right Dashboard (getDashboardHtml) renders full spacious GDB inspection workspace');
 
   await require('./vector-insert-tests').testVectorInsert();
-  ok('Vector push_back/insert: real GDB, reallocation, types and bounds');
+  ok('Vector insert/erase: real GDB, reallocation, types, bounds and stale revisions');
 
   await require('./paging-tests').testPaging();
   ok('Long sequences: real GDB paging, writes, bytes, bounds and stale context');

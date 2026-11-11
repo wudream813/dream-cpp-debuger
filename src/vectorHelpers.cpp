@@ -24,12 +24,25 @@ static int dream_vector_insert(void* object, unsigned long long index, T value) 
   } DREAM_CATCH
   return -3;
 }
+template <class T>
+static int dream_vector_erase(void* object, unsigned long long index) noexcept {
+  DREAM_TRY {
+    std::vector<T>& v = *static_cast<std::vector<T>*>(object);
+    if (index >= v.size()) return -2;
+    v.erase(v.begin() + static_cast<typename std::vector<T>::difference_type>(index));
+    return 0;
+  } DREAM_CATCH
+  return -3;
+}
 #define DREAM_VECTOR_HELPER(NAME, TYPE) \
   extern "C" { \
     unsigned long long dream_debug_vector_size_##NAME = sizeof(std::vector<TYPE>); \
     unsigned long long dream_debug_element_size_##NAME = sizeof(TYPE); \
     int dream_debug_vector_insert_##NAME(void* p, unsigned long long i, TYPE v) noexcept { \
       return dream_vector_insert<TYPE>(p, i, v); \
+    } \
+    int dream_debug_vector_erase_##NAME(void* p, unsigned long long i) noexcept { \
+      return dream_vector_erase<TYPE>(p, i); \
     } \
   }
 DREAM_VECTOR_HELPER(char, char)
@@ -60,4 +73,8 @@ extern "C" int dream_debug_vector_insert_string(void* p, unsigned long long i, c
     return 0;
   } DREAM_CATCH
   return -3;
+}
+
+extern "C" int dream_debug_vector_erase_string(void* p, unsigned long long i) noexcept {
+  return dream_vector_erase<std::string>(p, i);
 }

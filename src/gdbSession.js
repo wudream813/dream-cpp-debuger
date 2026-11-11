@@ -85,6 +85,7 @@ class GDBSession extends EventEmitter {
     this.inferiorPid = null;
     this._refreshPromise = null;
     this._vectorMutation = null;
+    this._vectorRevision = 0;
     this._lastStepOrigin = null;
     this._lastStepMode = null;
     this._autoSkipDepth = 0;
@@ -943,7 +944,7 @@ class GDBSession extends EventEmitter {
     return Object.prototype.hasOwnProperty.call(types, element) ? types[element] : null;
   }
 
-  async insertVectorElement(name, index, rawValue, context) {
+  async insertVectorElement(name, index, rawValue, context, options = {}) {
     await this._waitPendingRefresh();
     if (this._vectorMutation) throw new Error('vector 操作正在进行中');
     this._assertPauseContext(context);
@@ -952,12 +953,19 @@ class GDBSession extends EventEmitter {
     const type = variable && variable.sequence && variable.sequence.editable && variable.sequence.kind === 'vector'
       ? this._vectorElementType(variable.type) : null;
     if (!type) throw new Error('此 vector 类型不支持插入：仅支持默认分配器的基本数值类型和 std::string');
-    const append = index === null;
+    const deleting = options.delete === true;
+    const checkRevision = () => {
+      if (options.revision !== undefined && options.revision !== this._vectorRevision) throw new Error('容器内容已变化，请重新选择元素');
+    };
+    checkRevision();
+    const append = index === null && !deleting;
     let idx = append ? null : Number(index);
     if (!append && (!Number.isSafeInteger(idx) || idx < 0)) throw new Error('插入位置无效');
     const value = String(rawValue ?? '');
     let argument;
-    if (type === 'string') {
+    if (deleting) {
+      argument = '';
+    } else if (type === 'string') {
       const bytes = Buffer.from(value, 'utf8');
       if (bytes.length > 4096) throw new Error('字符串不能超过 4096 字节');
       // Octal escapes avoid GDB command injection and preserve the exact UTF-8 bytes.
@@ -980,15 +988,20 @@ class GDBSession extends EventEmitter {
     try {
       const length = await this._getContainerLength(name, true);
       this._assertPauseContext(context);
+      checkRevision();
       if (append) idx = length;
+      if (options.requireEmpty && length !== 0) throw new Error('容器已不为空，请重新选择元素');
+      if (options.anchorIndex !== undefined && (!Number.isSafeInteger(options.anchorIndex) || options.anchorIndex < 0 || options.anchorIndex >= length)) throw new Error('选择的元素已不存在');
+      if (deleting && idx >= length) throw new Error('删除位置越界');
       if (idx > length) throw new Error(`插入位置越界（有效范围 0–${length}）`);
       // Reject known ABI/layout mismatches before casting to the helper's vector type.
       // This is particularly important for old vs new libstdc++ std::string ABI.
       const check = `(sizeof(${name}) == dream_debug_vector_size_${type}) && (sizeof(*${name}._M_impl._M_start) == dream_debug_element_size_${type})`;
       const layout = await this.sendCommand(`-data-evaluate-expression "${check}"`).catch(err => { throw new Error(`无法验证 vector 辅助代码的 ABI：${err.message}`); });
       this._assertPauseContext(context);
-      if (!/^(?:true|1)$/.test(String(layout?.results?.value ?? ''))) throw new Error('vector 与调试助手的 ABI 布局不匹配，已拒绝插入');
-      const expression = `dream_debug_vector_insert_${type}((void*)&${name}, ${idx}, ${argument})`;
+      if (!/^(?:true|1)$/.test(String(layout?.results?.value ?? ''))) throw new Error('vector 与调试助手的 ABI 布局不匹配，已拒绝操作');
+      checkRevision();
+      const expression = deleting ? `dream_debug_vector_erase_${type}((void*)&${name}, ${idx})` : `dream_debug_vector_insert_${type}((void*)&${name}, ${idx}, ${argument})`;
       const escaped = expression.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
       let result;
       try { result = await this.sendCommand(`-data-evaluate-expression "${escaped}"`, 15000); }
@@ -996,13 +1009,14 @@ class GDBSession extends EventEmitter {
         if (/命令超时/.test(err.message)) {
           // The call may still be executing: do not resume against unknown state.
           await this.stop();
-          throw new Error('插入调用超时，调试会话已停止；结果不确定');
+          throw new Error('vector 操作调用超时，调试会话已停止；结果不确定');
         }
-        throw new Error(`GDB 无法调用插入助手（可能不支持目标函数调用）：${err.message}`);
+        throw new Error(`GDB 无法调用 vector 操作助手（可能不支持目标函数调用）：${err.message}`);
       }
       this._assertPauseContext(context);
       const code = String(result?.results?.value ?? '');
-      if (code !== '0') throw new Error(code === '-2' ? '插入位置越界' : code === '-3' ? '当前编译设置不支持安全插入' : `插入失败（代码 ${code}）`);
+      if (code !== '0') throw new Error(code === '-2' ? '操作位置越界' : code === '-3' ? '当前编译设置不支持安全插入' : `插入失败（代码 ${code}）`);
+      this._vectorRevision++;
       await this.refreshState();
       this._assertPauseContext(context);
     } finally {
@@ -1031,7 +1045,7 @@ class GDBSession extends EventEmitter {
       items.push(await this._readSequenceItem(name, seq.kind, i, seq.isChar, this._vectorElementType(variable.type) === 'string'));
     }
     this._assertPauseContext(context);
-    return { name, offset: start, length, items, isChar: seq.isChar, editable: seq.editable && seq.elementEditable !== false, context };
+    return { name, offset: start, length, items, isChar: seq.isChar, editable: seq.editable && seq.elementEditable !== false, vectorOps: seq.vectorOps === true, context };
   }
 
   _parseCharacterByte(input) {
@@ -1810,6 +1824,7 @@ class GDBSession extends EventEmitter {
       sessionId: this.sessionId,
       pauseId: this.pauseId,
       vectorMutationBusy: !!this._vectorMutation,
+      vectorRevision: this._vectorRevision,
       state: this.state,
       executable: this.executable,
       sourceFile: this.sourceFile,

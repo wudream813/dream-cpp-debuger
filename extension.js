@@ -779,30 +779,29 @@ class DreamDebugController {
         }
         break;
       }
-      case 'promptVectorInsert': {
+      case 'vectorContextAction': {
         const context = msg.context;
         try {
           this.session._assertPauseContext(context);
-          if (msg.mode !== 'append' && msg.mode !== 'insert') throw new Error('操作无效');
-          let index = null;
-          if (msg.mode === 'insert') {
-            const input = await vscode.window.showInputBox({
-              prompt: `在 ${msg.name} 的哪个索引之前插入？可填写当前长度以追加`,
-              placeHolder: '例如 0',
-              validateInput: v => /^\d+$/.test(v) && Number.isSafeInteger(Number(v)) ? null : '请输入非负整数索引'
+          if (!['left', 'right', 'delete', 'empty'].includes(msg.mode) || !Number.isSafeInteger(msg.revision)) throw new Error('操作无效');
+          const anchor = msg.mode === 'empty' ? null : msg.index;
+          if (anchor !== null && (!Number.isSafeInteger(anchor) || anchor < 0 || anchor >= Number.MAX_SAFE_INTEGER)) throw new Error('元素索引无效');
+          let value = '';
+          if (msg.mode !== 'delete') {
+            value = await vscode.window.showInputBox({
+              prompt: msg.mode === 'empty' ? `向空 ${msg.name} 添加第一个元素` : `在 ${msg.name}[${anchor}] ${msg.mode === 'left' ? '左侧' : '右侧'}插入元素`,
+              placeHolder: msg.isChar ? '单字节字符或 0x00–0xFF' : '输入元素值'
             });
-            if (input === undefined) break;
-            if (!/^\d+$/.test(input) || !Number.isSafeInteger(Number(input))) throw new Error('插入位置无效');
-            index = Number(input);
+            if (value === undefined) break;
           }
           this.session._assertPauseContext(context);
-          const value = await vscode.window.showInputBox({
-            prompt: `${msg.mode === 'append' ? '追加到' : '插入到'} ${msg.name} 的元素值`,
-            placeHolder: msg.valueHint || '例如 42'
+          const index = msg.mode === 'empty' ? 0 : anchor + (msg.mode === 'right' ? 1 : 0);
+          await this.session.insertVectorElement(msg.name, index, value, context, {
+            revision: msg.revision, delete: msg.mode === 'delete', requireEmpty: msg.mode === 'empty',
+            ...(anchor === null ? {} : { anchorIndex: anchor })
           });
-          if (value === undefined) break;
-          await this.session.insertVectorElement(msg.name, index, value, context);
-          this.postToAllViews({ type: 'sequenceEdited', requestId: msg.requestId });
+          const local = this.session.locals.find(v => v.name === msg.name);
+          this.postToAllViews({ type: 'sequenceEdited', requestId: msg.requestId, name: msg.name, length: local?.sequence?.length });
         } catch (err) {
           this.postToAllViews({ type: 'sequenceError', requestId: msg.requestId, message: err.message });
           vscode.window.showErrorMessage(`vector 操作失败：${err.message}`);

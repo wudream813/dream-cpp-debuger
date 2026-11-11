@@ -467,6 +467,10 @@ function getDashboardHtml(options = {}) {
     .sequence-dialog { width: min(700px, 100%); max-height: 85vh; overflow: auto; background: var(--vscode-editor-background); color: var(--vscode-editor-foreground); border: 1px solid var(--vscode-focusBorder); border-radius: 10px; padding: 18px; box-shadow: 0 12px 35px rgba(0,0,0,.35); }
     .sequence-head, .sequence-nav { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
     .sequence-message { color: var(--vscode-descriptionForeground); margin: 10px 0; }
+    .vector-menu { position: fixed; z-index: 120; min-width: 150px; padding: 5px; border: 1px solid var(--vscode-menu-border, var(--vscode-focusBorder)); border-radius: 6px; background: var(--vscode-menu-background, var(--vscode-editor-background)); color: var(--vscode-menu-foreground, var(--vscode-editor-foreground)); box-shadow: 0 5px 18px rgba(0,0,0,.35); }
+    .vector-menu[hidden] { display: none; }
+    .vector-menu button { display: block; width: 100%; padding: 7px 12px; border: 0; border-radius: 3px; text-align: left; color: inherit; background: transparent; cursor: pointer; }
+    .vector-menu button:hover, .vector-menu button:focus { background: var(--vscode-menu-selectionBackground); color: var(--vscode-menu-selectionForeground); outline: none; }
     /* ── Input Row (Watch & GDB Console) ── */
     .input-row {
       display: flex;
@@ -726,6 +730,11 @@ function getDashboardHtml(options = {}) {
       <div class="sequence-nav"><button class="btn" id="sequencePrev">上一页</button><span id="sequenceRange"></span><button class="btn" id="sequenceNext">下一页</button></div>
     </section>
   </div>
+  <div id="vectorMenu" class="vector-menu" role="menu" aria-label="vector 元素操作" hidden>
+    <button role="menuitem" data-menu-action="left">左侧插入</button>
+    <button role="menuitem" data-menu-action="right">右侧插入</button>
+    <button role="menuitem" data-menu-action="delete">删除元素</button>
+  </div>
   <script nonce="${nonce}">
     (function() {
       const vscode = typeof acquireVsCodeApi === 'function'
@@ -818,17 +827,19 @@ function getDashboardHtml(options = {}) {
         let arrayHtml = '';
         const seq = v.sequence;
         if (seq) {
-          const cells = seq.items.map(item =>
-            '<button class="array-cell" data-seq-index="' + item.index + '" data-seq-name="' + escapeHtml(varBaseName) + '" data-cur-val="' + escapeHtml(item.editValue) + '" data-char="' + (seq.isChar ? '1' : '0') + '"' + (!seq.editable || seq.elementEditable === false ? ' disabled' : '') + '>' +
-              '<span class="array-idx">[' + item.index + ']</span><span class="array-v">' + escapeHtml(item.value) + '</span></button>'
-          ).join('');
+          const cells = seq.items.map(item => {
+            const editable = seq.editable && seq.elementEditable !== false;
+            const vectorData = seq.vectorOps ? ' data-vector-index="' + item.index + '" data-vector-name="' + escapeHtml(varBaseName) + '" data-vector-char="' + (seq.isChar ? '1' : '0') + '" title="右击：删除或插入"' : '';
+            return '<button class="array-cell" data-seq-index="' + item.index + '" data-seq-name="' + escapeHtml(varBaseName) + '" data-cur-val="' + escapeHtml(item.editValue) + '" data-char="' + (seq.isChar ? '1' : '0') + '" data-editable="' + (editable ? '1' : '0') + '"' + vectorData + (!editable && !seq.vectorOps ? ' disabled' : '') + (!editable ? ' aria-label="此元素不支持修改值；右击可插入或删除"' : '') + '>' +
+              '<span class="array-idx">[' + item.index + ']</span><span class="array-v">' + escapeHtml(item.value) + '</span></button>';
+          }).join('');
           const more = seq.truncated ? '<button class="array-cell" data-seq-open="' + escapeHtml(varBaseName) + '" data-offset="' + seq.items.length + '" title="分页查看剩余元素">…<span class="array-idx">查看更多</span></button>' : '';
-          arrayHtml = '<div class="array-strip">' + cells + more + '</div>';
+          const empty = seq.vectorOps && seq.length === 0 ? '<button class="array-cell" data-vector-empty="' + escapeHtml(varBaseName) + '" data-vector-char="' + (seq.isChar ? '1' : '0') + '" title="空 vector：添加第一个元素">＋<span class="array-idx">添加首个元素</span></button>' : '';
+          arrayHtml = '<div class="array-strip">' + cells + more + empty + '</div>';
         } else if (Array.isArray(v.elements) && v.elements.length && v.kind === 'array') {
           arrayHtml = '<div class="array-strip">' + v.elements.map((item, idx) => '<div class="array-cell"><span class="array-idx">[' + idx + ']</span><span class="array-v">' + escapeHtml(item) + '</span></div>').join('') + '</div>';
         }
         const editableVal = Array.isArray(v.elements) && v.kind === 'array' ? '{ ' + v.elements.join(', ') + ' }' : String(v.displayValue ?? v.value ?? '');
-        const vectorButtons = seq && seq.vectorOps ? '<button class="icon-action" data-vector-mode="append" data-vector-name="' + escapeHtml(varBaseName) + '" data-vector-hint="' + escapeHtml(seq.isChar ? '单字节字符或 0x00–0xFF' : '输入元素值') + '"' + (currentBusy ? ' disabled' : '') + '>＋ push_back</button><button class="icon-action" data-vector-mode="insert" data-vector-name="' + escapeHtml(varBaseName) + '" data-vector-hint="' + escapeHtml(seq.isChar ? '单字节字符或 0x00–0xFF' : '输入元素值') + '"' + (currentBusy ? ' disabled' : '') + '>＋ insert</button>' : '';
         const actionBtn = options.isWatch
           ? '<button class="icon-action" data-remove-watch="' + escapeHtml(v.id || v.expr) + '" title="移除监视">✕ 移除</button>'
           : v.kind === 'uninitialized' || (v.kind === 'array' && (!seq || seq.truncated)) || (seq && (!seq.editable || seq.elementEditable === false || seq.kind === 'chars' || seq.fullValueUnavailable))
@@ -845,7 +856,7 @@ function getDashboardHtml(options = {}) {
               '</div>' +
               '<div class="var-right">' +
                 '<span class="var-val ' + valClass + '">' + escapeHtml(v.displayValue ?? v.value) + '</span>' +
-                vectorButtons + actionBtn +
+                actionBtn +
               '</div>' +
             '</div>' +
             arrayHtml +
@@ -853,12 +864,45 @@ function getDashboardHtml(options = {}) {
         );
       }
 
-      let currentContext = null, sequenceState = null, sequenceRequest = 0, currentBusy = false;
+      let currentContext = null, sequenceState = null, sequenceRequest = 0, currentBusy = false, currentRevision = 0, menuState = null;
       const overlay = document.getElementById('sequenceOverlay');
       const sequenceMessage = document.getElementById('sequenceMessage');
       const sequenceCells = document.getElementById('sequenceCells');
       const prev = document.getElementById('sequencePrev'), next = document.getElementById('sequenceNext');
       function sameContext(a, b) { return a && b && a.sessionId === b.sessionId && a.pauseId === b.pauseId && a.frame === b.frame; }
+      const vectorMenu = document.getElementById('vectorMenu');
+      function closeVectorMenu() { vectorMenu.hidden = true; menuState = null; }
+      function openVectorMenu(btn, x, y) {
+        if (!currentContext || currentBusy) return;
+        menuState = { name: btn.dataset.vectorName, index: Number(btn.dataset.vectorIndex), isChar: btn.dataset.vectorChar === '1', context: currentContext, revision: currentRevision };
+        vectorMenu.hidden = false;
+        vectorMenu.style.left = Math.max(4, Math.min(x, window.innerWidth - vectorMenu.offsetWidth - 4)) + 'px';
+        vectorMenu.style.top = Math.max(4, Math.min(y, window.innerHeight - vectorMenu.offsetHeight - 4)) + 'px';
+        vectorMenu.querySelector('button').focus();
+      }
+      document.addEventListener('contextmenu', e => {
+        const btn = e.target.closest('[data-vector-index]');
+        if (!btn) return;
+        e.preventDefault(); openVectorMenu(btn, e.clientX, e.clientY);
+      });
+      document.addEventListener('keydown', e => {
+        const btn = e.target.closest && e.target.closest('[data-vector-index]');
+        if (btn && (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10'))) {
+          e.preventDefault(); const rect = btn.getBoundingClientRect(); openVectorMenu(btn, rect.left, rect.bottom);
+        }
+        if (e.key === 'Escape' && !vectorMenu.hidden) { e.preventDefault(); e.stopImmediatePropagation(); closeVectorMenu(); }
+      });
+      document.addEventListener('click', e => { if (!vectorMenu.contains(e.target)) closeVectorMenu(); });
+      vectorMenu.querySelectorAll('[data-menu-action]').forEach(btn => btn.addEventListener('click', () => {
+        if (!menuState) return;
+        const chosen = menuState;
+        closeVectorMenu();
+        vscode.postMessage({ type: 'vectorContextAction', mode: btn.dataset.menuAction, ...chosen, requestId: sequenceRequest });
+      }));
+      document.addEventListener('click', e => {
+        const btn = e.target.closest('[data-vector-empty]');
+        if (btn && currentContext && !currentBusy) vscode.postMessage({ type: 'vectorContextAction', mode: 'empty', name: btn.dataset.vectorEmpty, isChar: btn.dataset.vectorChar === '1', context: currentContext, revision: currentRevision, requestId: sequenceRequest });
+      });
       function closeSequence() { sequenceState = null; overlay.hidden = true; sequenceRequest++; }
       document.getElementById('sequenceClose').addEventListener('click', closeSequence);
       overlay.addEventListener('click', e => { if (e.target === overlay) closeSequence(); });
@@ -879,6 +923,8 @@ function getDashboardHtml(options = {}) {
         const state = snap.state || 'idle';
         const isPaused = state === 'paused';
         currentBusy = !!snap.vectorMutationBusy;
+        currentRevision = snap.vectorRevision || 0;
+        if (menuState && (currentBusy || menuState.revision !== currentRevision || !sameContext(menuState.context, { sessionId: snap.sessionId, pauseId: snap.pauseId, frame: snap.currentFrame }) || !isPaused)) closeVectorMenu();
         const nextContext = isPaused ? { sessionId: snap.sessionId, pauseId: snap.pauseId, frame: snap.currentFrame } : null;
         if (sequenceState && !sameContext(sequenceState.context, nextContext)) closeSequence();
         currentContext = nextContext;
@@ -926,9 +972,6 @@ function getDashboardHtml(options = {}) {
           '</div>';
         } else {
           el.localsContainer.innerHTML = locals.map((v) => renderVariableCard(v, { isWatch: false })).join('');
-          el.localsContainer.querySelectorAll('[data-vector-mode]').forEach(btn => btn.addEventListener('click', () => {
-            if (currentContext && !currentBusy) vscode.postMessage({ type: 'promptVectorInsert', name: btn.dataset.vectorName, mode: btn.dataset.vectorMode, valueHint: btn.dataset.vectorHint, context: currentContext, requestId: sequenceRequest });
-          }));
           el.localsContainer.querySelectorAll('[data-seq-open]').forEach(btn => btn.addEventListener('click', () => {
             if (!currentContext) return;
             sequenceState = { name: btn.dataset.seqOpen, context: currentContext, offset: 0 };
@@ -936,7 +979,7 @@ function getDashboardHtml(options = {}) {
             overlay.hidden = false; requestSequence(Number(btn.dataset.offset));
           }));
           el.localsContainer.querySelectorAll('[data-seq-index]').forEach(btn => btn.addEventListener('click', () => {
-            if (currentContext) editSequence(btn.dataset.seqName, Number(btn.dataset.seqIndex), btn.dataset.curVal, btn.dataset.char === '1');
+            if (currentContext && btn.dataset.editable === '1') editSequence(btn.dataset.seqName, Number(btn.dataset.seqIndex), btn.dataset.curVal, btn.dataset.char === '1');
           }));
           el.localsContainer.querySelectorAll('[data-edit-var]').forEach((btn) => {
             btn.addEventListener('click', () => {
@@ -966,9 +1009,6 @@ function getDashboardHtml(options = {}) {
               sequence: (locals.find(v => v.name === w.expr) || {}).sequence
             }, { isWatch: true })
           ).join('');
-          el.watchesContainer.querySelectorAll('[data-vector-mode]').forEach(btn => btn.addEventListener('click', () => {
-            if (currentContext && !currentBusy) vscode.postMessage({ type: 'promptVectorInsert', name: btn.dataset.vectorName, mode: btn.dataset.vectorMode, valueHint: btn.dataset.vectorHint, context: currentContext, requestId: sequenceRequest });
-          }));
           el.watchesContainer.querySelectorAll('[data-seq-open]').forEach(btn => btn.addEventListener('click', () => {
             if (!currentContext) return;
             sequenceState = { name: btn.dataset.seqOpen, context: currentContext, offset: 0 };
@@ -976,7 +1016,7 @@ function getDashboardHtml(options = {}) {
             overlay.hidden = false; requestSequence(Number(btn.dataset.offset));
           }));
           el.watchesContainer.querySelectorAll('[data-seq-index]').forEach(btn => btn.addEventListener('click', () => {
-            if (currentContext) editSequence(btn.dataset.seqName, Number(btn.dataset.seqIndex), btn.dataset.curVal, btn.dataset.char === '1');
+            if (currentContext && btn.dataset.editable === '1') editSequence(btn.dataset.seqName, Number(btn.dataset.seqIndex), btn.dataset.curVal, btn.dataset.char === '1');
           }));
           el.watchesContainer.querySelectorAll('[data-remove-watch]').forEach((btn) => {
             btn.addEventListener('click', () => {
@@ -1085,13 +1125,14 @@ function getDashboardHtml(options = {}) {
           renderSnapshot(msg.snapshot);
         } else if (msg.type === 'sequencePage' && sequenceState && msg.requestId === sequenceRequest && sameContext(sequenceState.context, currentContext)) {
           const page = msg.page;
-          sequenceMessage.textContent = page.isChar ? '按字节索引；UTF-8 多字节字符会显示为多个字节。点击元素修改。' : '点击元素修改。';
+          sequenceMessage.textContent = page.isChar ? '按字节索引；UTF-8 多字节字符会显示为多个字节。点击元素修改。' : (page.vectorOps ? '左键修改，右键删除或在两侧插入。' : '点击元素修改。');
           document.getElementById('sequenceRange').textContent = page.length ? (page.offset + 1) + '–' + (page.offset + page.items.length) + ' / ' + page.length : '空容器';
           prev.disabled = page.offset === 0; next.disabled = page.offset + page.items.length >= page.length;
-          sequenceCells.innerHTML = page.items.map(item => '<button class="array-cell" data-index="' + item.index + '" data-value="' + escapeHtml(item.editValue) + '"' + (!page.editable ? ' disabled' : '') + '><span class="array-idx">[' + item.index + ']</span><span class="array-v">' + escapeHtml(item.value) + '</span></button>').join('');
-          sequenceCells.querySelectorAll('[data-index]').forEach(btn => btn.addEventListener('click', () => editSequence(page.name, Number(btn.dataset.index), btn.dataset.value, page.isChar)));
+          sequenceCells.innerHTML = page.items.map(item => '<button class="array-cell" data-index="' + item.index + '" data-value="' + escapeHtml(item.editValue) + '"' + (page.vectorOps ? ' data-vector-index="' + item.index + '" data-vector-name="' + escapeHtml(page.name) + '" data-vector-char="' + (page.isChar ? '1' : '0') + '" title="右击：删除或插入"' : '') + (!page.editable && !page.vectorOps ? ' disabled' : '') + '><span class="array-idx">[' + item.index + ']</span><span class="array-v">' + escapeHtml(item.value) + '</span></button>').join('');
+          sequenceCells.querySelectorAll('[data-index]').forEach(btn => btn.addEventListener('click', () => { if (page.editable) editSequence(page.name, Number(btn.dataset.index), btn.dataset.value, page.isChar); }));
         } else if (msg.type === 'sequenceEdited' && sequenceState && msg.requestId === sequenceRequest) {
-          requestSequence(sequenceState.offset);
+          const offset = msg.name === sequenceState.name && Number.isSafeInteger(msg.length) ? Math.min(sequenceState.offset, Math.max(0, msg.length - 1)) : sequenceState.offset;
+          requestSequence(offset);
         } else if (msg.type === 'sequenceError' && sequenceState && msg.requestId === sequenceRequest) {
           sequenceMessage.textContent = msg.message;
         } else if (msg.type === 'consoleOutput') {
