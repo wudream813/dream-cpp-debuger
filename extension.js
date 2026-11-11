@@ -11,6 +11,7 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const { appendBounded } = require('./src/outputLimits');
+const { openOutputFile } = require('./src/outputFile');
 const { readRegularPrefix } = require('./src/safeFiles');
 const { GDBSession } = require('./src/gdbSession');
 const { isSourceFile, compileSourceFile, runExecutable } = require('./src/compiler');
@@ -70,12 +71,14 @@ class DreamDebugController {
     this.stdinText = '';
     this.stdinFile = '';
     this.stdinFilePreview = '';
+    this.outputFile = '';
     this.streamHistory = [];
     this.runId = 0;
     this.resettingRunId = null;
     this.quickRunSawStderr = false;
     this.activeRunProcess = null;
     this.activeRunCancel = null;
+    this.activeFileRunPromise = null;
     this.quickRunId = null;
     this.activeRunStream = false;
 
@@ -289,6 +292,7 @@ class DreamDebugController {
     snap.stdinText = this.stdinText;
     snap.stdinFile = this.stdinFile;
     snap.stdinFilePreview = this.stdinFilePreview;
+    snap.outputFile = this.outputFile || '';
     snap.streamHistory = this.streamHistory.slice();
     snap.runId = this.runId;
     this.postToAllViews({
@@ -319,6 +323,7 @@ class DreamDebugController {
       return;
     }
 
+    const selectedOutputFile = this.outputFile || '';
     const runId = ++this.runId;
     this.quickRunId = null;
     this.resettingRunId = runId;
@@ -326,7 +331,10 @@ class DreamDebugController {
     this.streamHistory = [];
     this.session.programOutput = '';
     this.pushSnapshotToWebview();
+    const previousFileRun = this.activeFileRunPromise;
     this.cancelActiveRun();
+    if (previousFileRun) await previousFileRun.catch(() => {});
+    if (runId !== this.runId) return;
 
     // Save dirty document before compiling
     const openDoc = vscode.workspace.textDocuments.find((d) => d.fileName === sourceFile);
@@ -373,8 +381,15 @@ class DreamDebugController {
     this.session.gdbPath = this.config.get('gdbPath', 'gdb');
     this.session.maxArrayPreview = this.config.get('maxArrayPreview', 16);
 
+    let outputCapture = null;
     try {
+      if (selectedOutputFile) {
+        if (process.platform !== 'linux') throw new Error('调试输出到文件目前仅支持 Linux');
+        outputCapture = await openOutputFile(selectedOutputFile, [sourceFile, resolvedStdinFile, compileResult.executable], { shouldProceed: () => runId === this.runId });
+        if (runId !== this.runId) { await outputCapture.close(); return; }
+      }
       await this.session.start({
+        outputCapture,
         executable: compileResult.executable,
         sourceFile,
         cwd: path.dirname(sourceFile),
@@ -384,7 +399,11 @@ class DreamDebugController {
         stopAtMain: this.config.get('stopAtMain', true)
       });
     } catch (err) {
-      vscode.window.showErrorMessage(`启动 GDB 失败: ${err.message}`);
+      if (runId === this.runId) {
+        await this.session.stop();
+        vscode.window.showErrorMessage(`启动调试失败: ${err.message}`);
+      }
+      if (outputCapture) await outputCapture.close().catch(() => {});
     }
   }
 
@@ -410,6 +429,7 @@ class DreamDebugController {
       return;
     }
 
+    const selectedOutputFile = this.outputFile || '';
     const runId = ++this.runId;
     this.quickRunId = runId;
     this.resettingRunId = runId;
@@ -417,7 +437,10 @@ class DreamDebugController {
     this.streamHistory = [];
     this.session.programOutput = '';
     this.pushSnapshotToWebview();
+    const previousFileRun = this.activeFileRunPromise;
     this.cancelActiveRun();
+    if (previousFileRun) await previousFileRun.catch(() => {});
+    if (runId !== this.runId) return;
 
     const openDoc = vscode.workspace.textDocuments.find((d) => d.fileName === sourceFile);
     if (openDoc && openDoc.isDirty) {
@@ -450,7 +473,28 @@ class DreamDebugController {
     this.session.programOutput = '';
     this.pushSnapshotToWebview();
 
-    const runRes = await runExecutable(compileResult.executable, {
+    let outputCapture = null, previewTimer = null, runRes, runningPromise = null;
+    const pollOutputFile = (final = false) => {
+      if (!outputCapture) return;
+      const text = outputCapture.poll(final);
+      if (text && runId === this.runId) {
+        this.session.programOutput = appendBounded(this.session.programOutput, text);
+        this.pushSnapshotToWebview();
+      }
+    };
+    try {
+      if (selectedOutputFile) {
+        outputCapture = await openOutputFile(selectedOutputFile, [sourceFile, resolvedStdinFile, compileResult.executable], { shouldProceed: () => runId === this.runId });
+        if (runId !== this.runId) { await outputCapture.close(); return; }
+        previewTimer = setInterval(() => {
+          try { pollOutputFile(); } catch (err) {
+            clearInterval(previewTimer); previewTimer = null;
+            this.outputChannel.appendLine(`[Dream C++] 读取输出文件预览失败: ${err.message}`);
+          }
+        }, 120);
+      }
+      runningPromise = runExecutable(compileResult.executable, {
+      outputCapture,
       cwd: path.dirname(sourceFile),
       stdin: this.stdinMode === 'text' ? this.stdinText : '',
       stdinFile: this.stdinMode === 'file' ? resolvedStdinFile : '',
@@ -472,6 +516,23 @@ class DreamDebugController {
         this.pushSnapshotToWebview();
       }
     });
+      if (outputCapture) this.activeFileRunPromise = runningPromise;
+      runRes = await runningPromise;
+
+    } catch (err) {
+      if (runId === this.runId) {
+        this.quickRunId = null;
+        vscode.window.showErrorMessage(`运行失败：${err.message}`);
+      }
+      return;
+    } finally {
+      if (this.activeFileRunPromise === runningPromise) this.activeFileRunPromise = null;
+      if (previewTimer) clearInterval(previewTimer);
+      if (outputCapture) {
+        try { pollOutputFile(true); } catch (err) { this.outputChannel.appendLine(`[Dream C++] 读取输出文件预览失败: ${err.message}`); }
+        await outputCapture.close().catch(() => {});
+      }
+    }
 
     if (runId !== this.runId) return;
     this.activeRunProcess = null;
@@ -712,6 +773,21 @@ class DreamDebugController {
         break;
       case 'updateStdin':
         this.stdinText = msg.stdin || '';
+        break;
+      case 'pickOutputFile': {
+        const activeFile = this.resolveActiveSourceFile();
+        const defaultUri = activeFile ? vscode.Uri.file(path.join(path.dirname(activeFile), 'output.txt')) : undefined;
+        const uri = await vscode.window.showSaveDialog({
+          title: '选择程序输出文件（每次运行覆盖）', saveLabel: '选择输出文件', defaultUri,
+          filters: { '文本文件': ['txt', 'out', 'log'], '所有文件': ['*'] }
+        });
+        if (uri && uri.scheme === 'file') { this.outputFile = uri.fsPath; this.pushSnapshotToWebview(); }
+        else if (uri) vscode.window.showWarningMessage('请选择本地文件');
+        break;
+      }
+      case 'clearOutputFile':
+        this.outputFile = '';
+        this.pushSnapshotToWebview();
         break;
       case 'pickStdinFile': {
         const activeFile = this.resolveActiveSourceFile();

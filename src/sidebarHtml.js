@@ -525,6 +525,11 @@ function getSidebarHtml(options = {}) {
       </div>
     </div>
     <div class="card-body">
+      <div class="btn-row" style="margin-bottom:7px;">
+        <button id="btnPickOutputFile" class="btn">📁 选择输出文件</button>
+        <button id="btnClearOutputFile" class="btn">仅显示输出</button>
+      </div>
+      <div id="outputFileInfo" class="file-info-box">当前仅显示输出；选择文件后，每次运行覆盖文件。</div>
       <div id="programOutputBox" class="output-box">暂无程序输出</div>
     </div>
   </div>
@@ -556,6 +561,9 @@ function getSidebarHtml(options = {}) {
         btnPickStdinFile: document.getElementById('btnPickStdinFile'),
         stdinFilePathInput: document.getElementById('stdinFilePathInput'),
         filePreviewBox: document.getElementById('filePreviewBox'),
+        btnPickOutputFile: document.getElementById('btnPickOutputFile'),
+        btnClearOutputFile: document.getElementById('btnClearOutputFile'),
+        outputFileInfo: document.getElementById('outputFileInfo'),
         btnCopyStdout: document.getElementById('btnCopyStdout'),
         btnClearStdout: document.getElementById('btnClearStdout'),
         programOutputBox: document.getElementById('programOutputBox')
@@ -665,6 +673,9 @@ function getSidebarHtml(options = {}) {
           vscode.postMessage({ type: 'setStdinFilePath', filePath: '' });
         }
       });
+
+      el.btnPickOutputFile.addEventListener('click', () => vscode.postMessage({ type: 'pickOutputFile' }));
+      el.btnClearOutputFile.addEventListener('click', () => vscode.postMessage({ type: 'clearOutputFile' }));
 
       el.btnClearStdout.addEventListener('click', () => {
         el.programOutputBox.textContent = '暂无程序输出';
@@ -786,6 +797,10 @@ function getSidebarHtml(options = {}) {
                 : '尚未发送流式输入...';
           }
         }
+
+        el.outputFileInfo.textContent = snap.outputFile
+          ? '输出至：' + snap.outputFile + '（下次运行生效，每次覆盖；预览前 64 KiB，其余仅写文件）'
+          : '当前仅显示输出；选择文件后，每次运行覆盖文件。';
 
         if (typeof snap.programOutput === 'string' && snap.programOutput.length > 0) {
           el.programOutputBox.textContent = snap.programOutput;

@@ -105,6 +105,7 @@ class GDBSession extends EventEmitter {
     this.stdinClosed = false;
     this.stdinFifoFd = null;
     this.stdoutFile = null;
+    this.outputCapture = null;
     this.stdoutReadOffset = 0;
     this.stdoutTimer = null;
     this._outputLimitReached = false;
@@ -174,13 +175,16 @@ class GDBSession extends EventEmitter {
     this.tempDir = sessionTempDir;
     this.stdinFile = sessionStdinTarget;
     this.stdoutFile = sessionStdoutFile;
+    this.outputCapture = config.outputCapture || null;
 
     // Validate and quote before spawning, so invalid paths cannot leave a GDB
     // process or FIFO behind.
     let redirectArgs;
     try {
       const userArgs = Array.isArray(config.args) ? config.args.map(quoteInferiorArgument).join(' ') : '';
-      redirectArgs = `${userArgs} < ${quoteInferiorArgument(sessionStdinTarget)} > ${quoteInferiorArgument(sessionStdoutFile)} 2>&1`.trim();
+      if (this.outputCapture && process.platform !== 'linux') throw new Error('当前平台暂不支持安全的调试输出文件重定向');
+      const outputTarget = this.outputCapture ? '/proc/self/fd/3' : sessionStdoutFile;
+      redirectArgs = `${userArgs} < ${quoteInferiorArgument(sessionStdinTarget)} > ${quoteInferiorArgument(outputTarget)} 2>&1`.trim();
     } catch (err) {
       this.closeStdin();
       this._cleanupTempFiles(sessionTempDir);
@@ -199,7 +203,8 @@ class GDBSession extends EventEmitter {
     try {
       proc = spawn(this.gdbPath, gdbArgs, {
         cwd: this.cwd,
-        env: process.env
+        env: process.env,
+        ...(this.outputCapture ? { stdio: ['pipe', 'pipe', 'pipe', this.outputCapture.fd] } : {})
       });
       this.proc = proc;
     } catch (err) {
@@ -238,7 +243,8 @@ class GDBSession extends EventEmitter {
       // Always clean up this specific process's temp dir when it closes
       if (this.proc === proc && this.sessionId === currentSessionId) {
         this._stopOutputWatcher();
-        this._pollProgramOutput();
+        this._pollProgramOutput(true);
+        if (this.outputCapture) { void this.outputCapture.close(); this.outputCapture = null; }
         this.proc = null;
         for (const [, req] of this.pending) {
           clearTimeout(req.timer);
@@ -248,6 +254,7 @@ class GDBSession extends EventEmitter {
         if (this.state !== 'exited' && this.state !== 'idle') {
           this.state = 'exited';
           this.stopLocation = null;
+          this._clearInspectionState();
           this.emit('status', { state: 'exited', reason: 'gdb-closed', exitCode: code });
           this._emitSnapshot();
         }
@@ -658,6 +665,9 @@ class GDBSession extends EventEmitter {
       });
     }
 
+    this._pollProgramOutput(true);
+    if (this.outputCapture) { await this.outputCapture.close().catch(() => {}); this.outputCapture = null; }
+    this._clearInspectionState();
     this._cleanupTempFiles(oldTempDir);
 
     if (!options.keepStateExited) {
@@ -1771,7 +1781,20 @@ class GDBSession extends EventEmitter {
     }
   }
 
-  _pollProgramOutput() {
+  _pollProgramOutput(final = false) {
+    if (this.outputCapture) {
+      try {
+        const text = this.outputCapture.poll(final);
+        if (text) {
+          this.programOutput = appendBounded(this.programOutput, text);
+          this.emit('output', { category: 'stdout', text });
+          this._emitSnapshot();
+        }
+      } catch (err) {
+        this.emit('output', { category: 'system', text: `[Dream GDB] 读取输出文件失败: ${err.message}` });
+      }
+      return;
+    }
     if (!this.stdoutFile || !fs.existsSync(this.stdoutFile)) return;
     try {
       const stat = fs.statSync(this.stdoutFile);
@@ -1826,7 +1849,13 @@ class GDBSession extends EventEmitter {
     }
   }
 
+  _clearInspectionState() {
+    this.locals = []; this.stack = []; this.registers = []; this.prevLocalValues.clear();
+    this.watches = this.watches.map(w => ({ ...w, value: '程序已结束', type: '', kind: 'scalar', elements: null, error: null }));
+  }
+
   getSnapshot() {
+    const inactive = ['idle', 'exited', 'error'].includes(this.state);
     return {
       sessionId: this.sessionId,
       pauseId: this.pauseId,
@@ -1837,11 +1866,11 @@ class GDBSession extends EventEmitter {
       sourceFile: this.sourceFile,
       currentFrame: this.currentFrame,
       location: this.stopLocation,
-      stack: this.stack,
-      locals: this.locals,
-      watches: this.watches,
+      stack: inactive ? [] : this.stack,
+      locals: inactive ? [] : this.locals,
+      watches: inactive ? this.watches.map(w => ({ ...w, value: '程序已结束', type: '', kind: 'scalar', elements: null, error: null })) : this.watches,
       breakpoints: this.getBreakpointsList(),
-      registers: this.registers,
+      registers: inactive ? [] : this.registers,
       programOutput: this.programOutput
     };
   }

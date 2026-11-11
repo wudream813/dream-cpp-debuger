@@ -198,7 +198,8 @@ async function runExecutable(executablePath, options = {}) {
       let killedByTimeout = false, cancelled = false, settled = false;
       let fallbackTimer = null;
       const proc = spawn(executablePath, args, {
-        cwd, env: process.env, detached: process.platform !== 'win32', windowsHide: true
+        cwd, env: process.env, detached: process.platform !== 'win32', windowsHide: true,
+        ...(options.outputCapture ? { stdio: ['pipe', options.outputCapture.fd, options.outputCapture.fd] } : {})
       });
 
       function finish(code, signal, error) {
@@ -243,13 +244,13 @@ async function runExecutable(executablePath, options = {}) {
       }
       const timer = setTimeout(() => terminate('timeout'), timeoutMs);
 
-      proc.stdout.on('data', chunk => {
+      proc.stdout?.on('data', chunk => {
         if (settled) return;
         const text = chunk.toString();
         stdout = appendBounded(stdout, text);
         if (typeof options.onOutput === 'function') options.onOutput(text, stdout, 'stdout');
       });
-      proc.stderr.on('data', chunk => {
+      proc.stderr?.on('data', chunk => {
         if (settled) return;
         const text = chunk.toString();
         stderr = appendBounded(stderr, text);

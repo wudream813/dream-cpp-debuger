@@ -32,6 +32,13 @@ async function testResets() {
   assert.strictEqual(element('programOutputBox').textContent, '等待程序输出...');
   assert.ok(!element('streamHistoryBox').textContent.includes('42'));
   assert.strictEqual(element('streamLineInput').value, '');
+  element('btnPickOutputFile').handlers.click();
+  assert.strictEqual(messages.at(-1).type, 'pickOutputFile');
+  element('btnClearOutputFile').handlers.click();
+  assert.strictEqual(messages.at(-1).type, 'clearOutputFile');
+  snapshot({ runId: 2, state: 'paused', outputFile: '/tmp/result.txt' });
+  assert.ok(element('outputFileInfo').textContent.includes('/tmp/result.txt'));
+  assert.ok(element('outputFileInfo').textContent.includes('覆盖'));
   element('btnClearStdout').handlers.click();
   assert.strictEqual(messages.at(-1).type, 'clearProgramOutput');
 

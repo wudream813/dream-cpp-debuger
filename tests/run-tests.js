@@ -541,6 +541,9 @@ int main() {
   assert.ok(dashHtml.includes('body.vscode-light'));
   ok('Right Dashboard (getDashboardHtml) renders full spacious GDB inspection workspace');
 
+  await require('./output-file-tests').testOutputFile();
+  ok('Output file: large complete live output, safe paths and post-exit state cleanup');
+
   await require('./string-context-tests').testStringContext();
   ok('String context operations: GDB insertion, deletion, UTF-8 bytes, empty and bounds');
 
