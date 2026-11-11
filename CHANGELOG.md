@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.9
+
+- 长数组与 vector 支持点击省略号分页查看和修改，阻止截断的整体赋值。
+- 支持逐字节查看和修改 std::string 与 char 数组；分页和写入检查实际长度及暂停上下文。
+- 增加真实 GDB 分页、越界、字符和上下文切换回归测试。
+
 All notable changes to the **Dream C++ Debugger (GDB)** extension will be documented in this file.
 
 ## [1.1.8] - 2026-11-09

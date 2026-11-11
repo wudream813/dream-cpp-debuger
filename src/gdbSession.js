@@ -53,6 +53,7 @@ class GDBSession extends EventEmitter {
 
     this.proc = null;
     this.sessionId = 0;
+    this.pauseId = 0;
     this.state = 'idle'; // 'idle' | 'starting' | 'running' | 'paused' | 'exited' | 'error'
     this.executable = null;
     this.sourceFile = null;
@@ -818,6 +819,135 @@ class GDBSession extends EventEmitter {
     return Number(text);
   }
 
+  _pauseContext() {
+    return { sessionId: this.sessionId, pauseId: this.pauseId, frame: this.currentFrame };
+  }
+
+  _assertPauseContext(context) {
+    if (this.state !== 'paused' || !this.proc || !context ||
+        context.sessionId !== this.sessionId || context.pauseId !== this.pauseId ||
+        context.frame !== this.currentFrame) throw new Error('调试状态已变化，请重新打开查看器');
+  }
+
+  _sequenceKind(variable, rawType) {
+    const type = String(rawType || variable.type || '');
+    if (!/^[A-Za-z_]\w*$/.test(variable.name || '') || variable.kind === 'uninitialized') return null;
+    if (/\b(?:std::)?(?:basic_string<char[^>]*>|string)\b/.test(type) && !/[\[*]/.test(type)) return 'string';
+    if (/\bvector\s*</.test(type)) return /vector\s*<\s*bool\b/.test(type) ? null : 'vector';
+    if (/^[^\[\]]+\[\d+\]$/.test(type.trim())) return /\bchar\s*\[/.test(type) ? 'chars' : 'array';
+    return null;
+  }
+
+  async _sequenceLength(name, kind) {
+    if (kind !== 'string') return this._getContainerLength(name, kind === 'vector');
+    const res = await this.sendCommand(`-data-evaluate-expression "(unsigned long)${name}._M_string_length"`);
+    const value = String(res?.results?.value ?? '').trim();
+    if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))) throw new Error('无法确认字符串长度');
+    return Number(value);
+  }
+
+  async _readSequenceItem(name, kind, index, isChar) {
+    let expression = kind === 'vector' ? `*(${name}._M_impl._M_start + ${index})` :
+      kind === 'string' ? `${name}._M_dataplus._M_p[${index}]` : `${name}[${index}]`;
+    if (isChar) expression = `(unsigned char)(${expression})`;
+    const res = await this.sendCommand(`-data-evaluate-expression "${expression}"`);
+    const value = String(res?.results?.value ?? '');
+    if (!isChar) return { index, value, editValue: value };
+    const m = value.match(/^\s*(\d+)/);
+    if (!m || Number(m[1]) > 255) throw new Error('无法读取字符字节');
+    const byte = Number(m[1]);
+    const printable = byte >= 32 && byte <= 126;
+    const display = printable ? String.fromCharCode(byte) : `0x${byte.toString(16).padStart(2, '0')}`;
+    return { index, value: display, editValue: printable && byte !== 32 ? display : `0x${byte.toString(16).padStart(2, '0')}` };
+  }
+
+  async _describeSequence(formatted, rawType) {
+    const kind = this._sequenceKind(formatted, rawType);
+    if (!kind) return formatted;
+    try {
+      const length = await this._sequenceLength(formatted.name, kind);
+      const isChar = kind === 'string' || kind === 'chars' || (kind === 'vector' && /vector\s*<\s*(?:signed |unsigned )?char\b/.test(rawType));
+      const previewCount = Math.min(length, Math.max(1, Math.min(this.maxArrayPreview, 32)));
+      let items;
+      if (isChar) {
+        items = [];
+        for (let i = 0; i < previewCount; i++) items.push(await this._readSequenceItem(formatted.name, kind, i, true));
+      } else {
+        items = (formatted.elements || []).slice(0, previewCount).map((value, index) => ({ index, value, editValue: value }));
+      }
+      // If GDB returned a shortened preview, never claim it is complete.
+      const sequence = { kind, length, isChar, items, truncated: items.length < length,
+        editable: !/(?:^|\s)const(?:\s|$)/.test(rawType) };
+      if (kind !== 'string' && kind !== 'chars') {
+        const prefix = kind === 'vector' ? `vector[${length}]` : `[${length}]`;
+        formatted = { ...formatted, kind: 'array', elements: items.map(item => item.value),
+          displayValue: `${prefix} { ${items.map(item => item.value).join(', ')}${sequence.truncated ? ', …' : ''} }` };
+      } else if (formatted.displayValue.length > 180) {
+        formatted = { ...formatted, displayValue: formatted.displayValue.slice(0, 180) + '…' };
+        sequence.truncated = true;
+        sequence.fullValueUnavailable = true;
+      }
+      return { ...formatted, sequence };
+    } catch (_) {
+      // Unavailable ABI/type: retain a read-only preview rather than guess bounds.
+      return formatted;
+    }
+  }
+
+  async getSequencePage(name, offset, pageSize, context) {
+    await this._waitPendingRefresh();
+    this._assertPauseContext(context);
+    if (!/^[A-Za-z_]\w*$/.test(name || '')) throw new Error('只能查看当前栈帧中的局部变量');
+    const variable = this.locals.find(v => v.name === name);
+    if (!variable || !variable.sequence) throw new Error('该变量无法安全分页查看');
+    const seq = variable.sequence;
+    const length = await this._sequenceLength(name, seq.kind);
+    this._assertPauseContext(context);
+    const start = Number(offset);
+    const size = Number(pageSize);
+    if (!Number.isSafeInteger(start) || start < 0 || !Number.isSafeInteger(size) || size < 1 || size > 32 || (start >= length && start !== 0)) throw new Error('分页范围无效');
+    const items = [];
+    for (let i = start; i < Math.min(length, start + size); i++) {
+      this._assertPauseContext(context);
+      items.push(await this._readSequenceItem(name, seq.kind, i, seq.isChar));
+    }
+    this._assertPauseContext(context);
+    return { name, offset: start, length, items, isChar: seq.isChar, editable: seq.editable, context };
+  }
+
+  _parseCharacterByte(input) {
+    let value = String(input ?? '');
+    if (/^0x[0-9a-f]{1,2}$/i.test(value.trim())) return parseInt(value.trim().slice(2), 16);
+    const escapes = { '\\0': 0, '\\n': 10, '\\r': 13, '\\t': 9, '\\\\': 92, "\\'": 39 };
+    if (Object.prototype.hasOwnProperty.call(escapes, value)) return escapes[value];
+    if (value.length >= 2 && value[0] === "'" && value[value.length - 1] === "'") value = value.slice(1, -1);
+    if (Object.prototype.hasOwnProperty.call(escapes, value)) return escapes[value];
+    if (Buffer.byteLength(value, 'utf8') !== 1) throw new Error('请输入一个单字节字符、转义序列或 0x00–0xFF；多字节字符请修改整个字符串');
+    return Buffer.from(value, 'utf8')[0];
+  }
+
+  async setSequenceElement(name, index, value, context) {
+    await this._waitPendingRefresh();
+    this._assertPauseContext(context);
+    const variable = this.locals.find(v => v.name === name);
+    if (!variable || !variable.sequence || !variable.sequence.editable) throw new Error('变量不可修改');
+    const seq = variable.sequence;
+    const idx = Number(index);
+    if (!Number.isSafeInteger(idx) || idx < 0) throw new Error('索引无效');
+    const length = await this._sequenceLength(name, seq.kind);
+    this._assertPauseContext(context);
+    if (idx >= length) throw new Error('索引越界');
+    const input = seq.isChar ? String(this._parseCharacterByte(value)) : String(value ?? '').trim();
+    if (!input || /[\r\n\0]/.test(input) || input.includes('...') || input.includes('…')) throw new Error('元素值无效');
+    const target = seq.kind === 'vector' ? `*(${name}._M_impl._M_start + ${idx})` :
+      seq.kind === 'string' ? `${name}._M_dataplus._M_p[${idx}]` : `${name}[${idx}]`;
+    const expression = `${target} = ${input}`.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    await this.sendCommand(`-data-evaluate-expression "${expression}"`);
+    this._assertPauseContext(context);
+    await this.refreshState();
+    this._assertPauseContext(context);
+  }
+
   /**
    * Modify a local variable, std::string, std::vector, array, or element value during pause.
    */
@@ -898,6 +1028,8 @@ class GDBSession extends EventEmitter {
 
       // 2. Handle whole std::vector or C array assignment (e.g. `{1, 2, 3}` or `vector[3] { 1, 2, 3 }`)
       if (targetVar && targetVar.kind === 'array') {
+        if (!targetVar.sequence || targetVar.sequence.truncated) throw new Error('长数组或无法确认长度的数组不可整体修改，请逐项修改');
+        if (rawInput.includes('...') || rawInput.includes('…')) throw new Error('省略的数组不可整体修改，请逐项修改');
         const stripped = rawInput
           .replace(/^(?:std::)?vector\[\d+\]\s*/i, '')
           .replace(/^\[\d+\]\s*/, '')
@@ -939,6 +1071,7 @@ class GDBSession extends EventEmitter {
    */
   async selectFrame(frameLevel) {
     if (this.state !== 'paused') return;
+    this.pauseId++;
     this.currentFrame = Number(frameLevel) || 0;
     await this.sendCommand(`-stack-select-frame ${this.currentFrame}`).catch(() => {});
     await this.refreshState();
@@ -1058,7 +1191,8 @@ class GDBSession extends EventEmitter {
           continue;
         }
 
-        const formatted = await this._unwrapValueIfNeeded(v.name, v.value, rawType);
+        let formatted = await this._unwrapValueIfNeeded(v.name, v.value, rawType);
+        formatted = await this._describeSequence(formatted, rawType);
         const prevVal = this.prevLocalValues.get(v.name);
         const changed = formatted.kind !== 'uninitialized' && prevVal !== undefined && prevVal !== formatted.displayValue;
         if (formatted.kind !== 'uninitialized') {
@@ -1442,6 +1576,7 @@ class GDBSession extends EventEmitter {
     this._autoSkipDepth = 0;
 
     this.state = 'paused';
+    this.pauseId++;
     this.currentFrame = 0;
     if (results['thread-id']) {
       this.currentThread = Number(results['thread-id']) || 1;
@@ -1546,6 +1681,7 @@ class GDBSession extends EventEmitter {
   getSnapshot() {
     return {
       sessionId: this.sessionId,
+      pauseId: this.pauseId,
       state: this.state,
       executable: this.executable,
       sourceFile: this.sourceFile,

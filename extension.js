@@ -778,6 +778,31 @@ class DreamDebugController {
         }
         break;
       }
+      case 'sequencePage': {
+        try {
+          const page = await this.session.getSequencePage(msg.name, msg.offset, 32, msg.context);
+          this.postToAllViews({ type: 'sequencePage', requestId: msg.requestId, page });
+        } catch (err) {
+          this.postToAllViews({ type: 'sequenceError', requestId: msg.requestId, message: err.message });
+        }
+        break;
+      }
+      case 'editSequenceElement': {
+        const context = msg.context;
+        try {
+          this.session._assertPauseContext(context);
+          const val = await vscode.window.showInputBox({
+            prompt: `修改 ${msg.name}[${msg.index}]` + (msg.isChar ? '（单字节字符、转义序列或 0x00–0xFF；UTF-8 按字节索引）' : ''),
+            value: msg.currentValue || ''
+          });
+          if (val !== undefined) await this.session.setSequenceElement(msg.name, msg.index, val, context);
+          this.postToAllViews({ type: 'sequenceEdited', requestId: msg.requestId });
+        } catch (err) {
+          this.postToAllViews({ type: 'sequenceError', requestId: msg.requestId, message: err.message });
+          vscode.window.showErrorMessage(`修改失败：${err.message}`);
+        }
+        break;
+      }
       case 'promptEditVariable': {
         const newVal = await vscode.window.showInputBox({
           prompt: `修改变量 ${msg.name} 的当前值`,

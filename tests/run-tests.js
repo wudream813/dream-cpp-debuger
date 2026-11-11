@@ -541,6 +541,9 @@ int main() {
   assert.ok(dashHtml.includes('body.vscode-light'));
   ok('Right Dashboard (getDashboardHtml) renders full spacious GDB inspection workspace');
 
+  await require('./paging-tests').testPaging();
+  ok('Long sequences: real GDB paging, writes, bytes, bounds and stale context');
+
   await require('./vector-loop-tests').testVectorLoop();
   ok('Compact vector declaration updates locals and watches after each loop iteration');
 

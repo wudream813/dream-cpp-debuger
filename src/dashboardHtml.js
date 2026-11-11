@@ -462,6 +462,11 @@ function getDashboardHtml(options = {}) {
       color: var(--array-val-fg);
     }
 
+    .sequence-overlay { position: fixed; inset: 0; z-index: 100; background: rgba(0,0,0,.55); display: flex; align-items: center; justify-content: center; padding: 16px; }
+    .sequence-overlay[hidden] { display: none; }
+    .sequence-dialog { width: min(700px, 100%); max-height: 85vh; overflow: auto; background: var(--vscode-editor-background); color: var(--vscode-editor-foreground); border: 1px solid var(--vscode-focusBorder); border-radius: 10px; padding: 18px; box-shadow: 0 12px 35px rgba(0,0,0,.35); }
+    .sequence-head, .sequence-nav { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .sequence-message { color: var(--vscode-descriptionForeground); margin: 10px 0; }
     /* ── Input Row (Watch & GDB Console) ── */
     .input-row {
       display: flex;
@@ -713,6 +718,14 @@ function getDashboardHtml(options = {}) {
     </div>
   </div>
 
+  <div id="sequenceOverlay" class="sequence-overlay" hidden>
+    <section class="sequence-dialog" role="dialog" aria-modal="true" aria-labelledby="sequenceTitle">
+      <div class="sequence-head"><strong id="sequenceTitle">容器元素</strong><button class="btn" id="sequenceClose">关闭</button></div>
+      <div class="sequence-message" id="sequenceMessage" aria-live="polite"></div>
+      <div id="sequenceCells" class="array-strip"></div>
+      <div class="sequence-nav"><button class="btn" id="sequencePrev">上一页</button><span id="sequenceRange"></span><button class="btn" id="sequenceNext">下一页</button></div>
+    </section>
+  </div>
   <script nonce="${nonce}">
     (function() {
       const vscode = typeof acquireVsCodeApi === 'function'
@@ -803,24 +816,21 @@ function getDashboardHtml(options = {}) {
           v.kind === 'pointer' ? 'pointer' : '';
         const varBaseName = v.name || v.expr || '';
         let arrayHtml = '';
-        if (Array.isArray(v.elements) && v.elements.length > 0 && v.kind === 'array') {
-          const cells = v.elements.map((item, idx) =>
-            '<div class="array-cell" data-edit-var="' + escapeHtml(varBaseName + '[' + idx + ']') + '" data-cur-val="' + escapeHtml(item) + '" title="点击修改 ' + escapeHtml(varBaseName + '[' + idx + ']') + ' 的值">' +
-              '<span class="array-idx">[' + idx + ']</span>' +
-              '<span class="array-v">' + escapeHtml(item) + '</span>' +
-            '</div>'
+        const seq = v.sequence;
+        if (seq) {
+          const cells = seq.items.map(item =>
+            '<button class="array-cell" data-seq-index="' + item.index + '" data-seq-name="' + escapeHtml(varBaseName) + '" data-cur-val="' + escapeHtml(item.editValue) + '" data-char="' + (seq.isChar ? '1' : '0') + '"' + (!seq.editable ? ' disabled' : '') + '>' +
+              '<span class="array-idx">[' + item.index + ']</span><span class="array-v">' + escapeHtml(item.value) + '</span></button>'
           ).join('');
-          arrayHtml = '<div class="array-strip">' + cells + '</div>';
+          const more = seq.truncated ? '<button class="array-cell" data-seq-open="' + escapeHtml(varBaseName) + '" data-offset="' + seq.items.length + '" title="分页查看剩余元素">…<span class="array-idx">查看更多</span></button>' : '';
+          arrayHtml = '<div class="array-strip">' + cells + more + '</div>';
+        } else if (Array.isArray(v.elements) && v.elements.length && v.kind === 'array') {
+          arrayHtml = '<div class="array-strip">' + v.elements.map((item, idx) => '<div class="array-cell"><span class="array-idx">[' + idx + ']</span><span class="array-v">' + escapeHtml(item) + '</span></div>').join('') + '</div>';
         }
-
-        const editableVal =
-          Array.isArray(v.elements) && v.kind === 'array'
-            ? '{ ' + v.elements.join(', ') + ' }'
-            : String(v.displayValue ?? v.value ?? '');
-
+        const editableVal = Array.isArray(v.elements) && v.kind === 'array' ? '{ ' + v.elements.join(', ') + ' }' : String(v.displayValue ?? v.value ?? '');
         const actionBtn = options.isWatch
           ? '<button class="icon-action" data-remove-watch="' + escapeHtml(v.id || v.expr) + '" title="移除监视">✕ 移除</button>'
-          : v.kind === 'uninitialized'
+          : v.kind === 'uninitialized' || (v.kind === 'array' && (!seq || seq.truncated)) || (seq && (!seq.editable || seq.kind === 'chars' || seq.fullValueUnavailable))
           ? ''
           : '<button class="icon-action" data-edit-var="' + escapeHtml(varBaseName) + '" data-cur-val="' + escapeHtml(editableVal) + '" title="修改变量值">✎ 修改值</button>';
 
@@ -842,10 +852,34 @@ function getDashboardHtml(options = {}) {
         );
       }
 
+      let currentContext = null, sequenceState = null, sequenceRequest = 0;
+      const overlay = document.getElementById('sequenceOverlay');
+      const sequenceMessage = document.getElementById('sequenceMessage');
+      const sequenceCells = document.getElementById('sequenceCells');
+      const prev = document.getElementById('sequencePrev'), next = document.getElementById('sequenceNext');
+      function sameContext(a, b) { return a && b && a.sessionId === b.sessionId && a.pauseId === b.pauseId && a.frame === b.frame; }
+      function closeSequence() { sequenceState = null; overlay.hidden = true; sequenceRequest++; }
+      document.getElementById('sequenceClose').addEventListener('click', closeSequence);
+      overlay.addEventListener('click', e => { if (e.target === overlay) closeSequence(); });
+      document.addEventListener('keydown', e => { if (e.key === 'Escape' && !overlay.hidden) closeSequence(); });
+      function requestSequence(offset) {
+        if (!sequenceState) return;
+        sequenceState.offset = offset;
+        sequenceMessage.textContent = '正在读取…'; sequenceCells.innerHTML = ''; prev.disabled = true; next.disabled = true;
+        vscode.postMessage({ type: 'sequencePage', name: sequenceState.name, offset, context: sequenceState.context, requestId: ++sequenceRequest });
+      }
+      prev.addEventListener('click', () => requestSequence(Math.max(0, sequenceState.offset - 32)));
+      next.addEventListener('click', () => requestSequence(sequenceState.offset + 32));
+      function editSequence(name, index, val, isChar) {
+        vscode.postMessage({ type: 'editSequenceElement', name, index, currentValue: val, isChar, context: currentContext, requestId: sequenceRequest });
+      }
       function renderSnapshot(snap) {
         if (!snap) return;
         const state = snap.state || 'idle';
         const isPaused = state === 'paused';
+        const nextContext = isPaused ? { sessionId: snap.sessionId, pauseId: snap.pauseId, frame: snap.currentFrame } : null;
+        if (sequenceState && !sameContext(sequenceState.context, nextContext)) closeSequence();
+        currentContext = nextContext;
         const isRunning = state === 'running' || state === 'starting';
         const isActive = isPaused || isRunning;
 
@@ -890,6 +924,15 @@ function getDashboardHtml(options = {}) {
           '</div>';
         } else {
           el.localsContainer.innerHTML = locals.map((v) => renderVariableCard(v, { isWatch: false })).join('');
+          el.localsContainer.querySelectorAll('[data-seq-open]').forEach(btn => btn.addEventListener('click', () => {
+            if (!currentContext) return;
+            sequenceState = { name: btn.dataset.seqOpen, context: currentContext, offset: 0 };
+            document.getElementById('sequenceTitle').textContent = sequenceState.name + ' 的元素';
+            overlay.hidden = false; requestSequence(Number(btn.dataset.offset));
+          }));
+          el.localsContainer.querySelectorAll('[data-seq-index]').forEach(btn => btn.addEventListener('click', () => {
+            if (currentContext) editSequence(btn.dataset.seqName, Number(btn.dataset.seqIndex), btn.dataset.curVal, btn.dataset.char === '1');
+          }));
           el.localsContainer.querySelectorAll('[data-edit-var]').forEach((btn) => {
             btn.addEventListener('click', () => {
               vscode.postMessage({
@@ -914,9 +957,19 @@ function getDashboardHtml(options = {}) {
               type: w.type,
               kind: w.kind,
               displayValue: w.value,
-              elements: w.elements
+              elements: w.elements,
+              sequence: (locals.find(v => v.name === w.expr) || {}).sequence
             }, { isWatch: true })
           ).join('');
+          el.watchesContainer.querySelectorAll('[data-seq-open]').forEach(btn => btn.addEventListener('click', () => {
+            if (!currentContext) return;
+            sequenceState = { name: btn.dataset.seqOpen, context: currentContext, offset: 0 };
+            document.getElementById('sequenceTitle').textContent = sequenceState.name + ' 的元素';
+            overlay.hidden = false; requestSequence(Number(btn.dataset.offset));
+          }));
+          el.watchesContainer.querySelectorAll('[data-seq-index]').forEach(btn => btn.addEventListener('click', () => {
+            if (currentContext) editSequence(btn.dataset.seqName, Number(btn.dataset.seqIndex), btn.dataset.curVal, btn.dataset.char === '1');
+          }));
           el.watchesContainer.querySelectorAll('[data-remove-watch]').forEach((btn) => {
             btn.addEventListener('click', () => {
               vscode.postMessage({
@@ -1022,6 +1075,17 @@ function getDashboardHtml(options = {}) {
         if (!msg) return;
         if (msg.type === 'snapshot') {
           renderSnapshot(msg.snapshot);
+        } else if (msg.type === 'sequencePage' && sequenceState && msg.requestId === sequenceRequest && sameContext(sequenceState.context, currentContext)) {
+          const page = msg.page;
+          sequenceMessage.textContent = page.isChar ? '按字节索引；UTF-8 多字节字符会显示为多个字节。点击元素修改。' : '点击元素修改。';
+          document.getElementById('sequenceRange').textContent = page.length ? (page.offset + 1) + '–' + (page.offset + page.items.length) + ' / ' + page.length : '空容器';
+          prev.disabled = page.offset === 0; next.disabled = page.offset + page.items.length >= page.length;
+          sequenceCells.innerHTML = page.items.map(item => '<button class="array-cell" data-index="' + item.index + '" data-value="' + escapeHtml(item.editValue) + '"' + (!page.editable ? ' disabled' : '') + '><span class="array-idx">[' + item.index + ']</span><span class="array-v">' + escapeHtml(item.value) + '</span></button>').join('');
+          sequenceCells.querySelectorAll('[data-index]').forEach(btn => btn.addEventListener('click', () => editSequence(page.name, Number(btn.dataset.index), btn.dataset.value, page.isChar)));
+        } else if (msg.type === 'sequenceEdited' && sequenceState && msg.requestId === sequenceRequest) {
+          requestSequence(sequenceState.offset);
+        } else if (msg.type === 'sequenceError' && sequenceState && msg.requestId === sequenceRequest) {
+          sequenceMessage.textContent = msg.message;
         } else if (msg.type === 'consoleOutput') {
           el.gdbConsoleBox.textContent = (el.gdbConsoleBox.textContent + '\\n' + msg.text).slice(-1048576);
           el.gdbConsoleBox.scrollTop = el.gdbConsoleBox.scrollHeight;
