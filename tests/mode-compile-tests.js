@@ -27,7 +27,7 @@ async function testModeCompile() {
   assert.strictEqual(id(S, 'compileProgress').hidden, false);
   assert.match(id(S, 'statusPill').textContent, /正在编译/);
   assert.strictEqual(id(S, 'btnStartDebug').disabled, true);
-  assert.strictEqual(id(S, 'btnQuickRun').disabled, true);
+  assert.strictEqual(id(S, 'btnQuickRun'), null);
   assert.strictEqual(id(D, 'btnStop').disabled, false);
   assert.strictEqual(id(D, 'breakpointCard').hidden, true);
   assert.strictEqual(id(D, 'advancedCard').hidden, true);
@@ -44,6 +44,12 @@ async function testModeCompile() {
   assert.strictEqual(id(D, 'breakpointCard').hidden, false);
   assert.strictEqual(id(D, 'advancedCard').hidden, false);
   assert.strictEqual(id(D, 'labelContinue').textContent, '继续 F5');
+  const fullType = 'std::vector<Example<\"long\">>';
+  send(dashboard, { runId: 1, userMode: 'expert', state: 'paused', locals: [{ name: 'x', type: fullType, value: '1' }] });
+  const tag = D.querySelector('.var-type');
+  assert.strictEqual(tag.title, fullType);
+  assert.strictEqual(tag.textContent, fullType);
+  assert.strictEqual(dashboard.window.getComputedStyle(tag).textOverflow, 'ellipsis');
   id(D, 'btnContinue').click();
   assert.strictEqual(messages.at(-1).type, 'continue');
   assert.deepStrictEqual(errors, []);
@@ -54,7 +60,9 @@ async function testModeCompile() {
   const realRequire = createRequire(filename);
   const pending = [];
   let selected, pickerCalls = 0;
-  const vscode = { workspace: { textDocuments: [], getConfiguration: () => ({ get: (_k, def) => def }) }, window: {
+  let saved;
+  const config = { get: (_k, def) => saved || def, inspect: () => ({ globalValue: saved }), update: async (_k, v) => { saved = v; } };
+  const vscode = { ConfigurationTarget: { Global: 1 }, workspace: { textDocuments: [], getConfiguration: () => config }, window: {
     showQuickPick: async items => { pickerCalls++; return items.find(i => i.mode === selected); },
     showWarningMessage() {}, showErrorMessage() {}
   } };
@@ -63,8 +71,8 @@ async function testModeCompile() {
   vm.runInThisContext('(function(require,module,exports,__filename,__dirname){' + fs.readFileSync(filename, 'utf8') + '\nmodule.exports.TestController = DreamDebugController;\n})')(
     id => id === 'vscode' ? vscode : id === './src/compiler' ? fakeCompiler : realRequire(id), m, m.exports, filename, path.dirname(filename));
   const c = Object.create(m.exports.TestController.prototype);
-  let saved, snapshots = [];
-  Object.assign(c, { context: { globalState: { update: async (_k, v) => { saved = v; } } },
+  let snapshots = [];
+  Object.assign(c, { context: { globalState: { update: async () => {} } },
     userMode: 'expert', modeWasSelected: false, modePromptShown: false, modePrompt: null,
     runId: 1, compilingRunId: null, compileQueue: Promise.resolve(), statusBarItem: {},
     streamHistory: [], session: { state: 'idle', getSnapshot: () => ({ state: 'idle' }), stop: async () => {} },
@@ -78,6 +86,12 @@ async function testModeCompile() {
   selected = 'expert'; await c.chooseUserMode();
   assert.strictEqual(saved, 'expert'); assert.strictEqual(snapshots.at(-1).userMode, 'expert');
   selected = undefined; await c.chooseUserMode(); assert.strictEqual(saved, 'expert');
+  saved = 'beginner'; c.syncUserModeFromConfig();
+  assert.strictEqual(snapshots.at(-1).userMode, 'beginner', 'settings changes update both views');
+  saved = undefined; c.legacyModeToMigrate = 'expert'; c.modeWasSelected = true;
+  await c.ensureUserMode(); assert.strictEqual(saved, 'expert', 'old preference migrates to settings');
+  saved = 'beginner'; c.legacyModeToMigrate = 'expert';
+  await c.ensureUserMode(); assert.strictEqual(saved, 'beginner', 'configured mode wins over old preference');
 
   const one = c.compileWithProgress('one.cpp', {}, 1);
   await new Promise(resolve => setImmediate(resolve));
@@ -107,6 +121,10 @@ async function testModeCompile() {
   c.applyCompilerDiagnostics = () => {}; c.openDashboardPanel = () => {};
   let started = false;
   c.session.start = async () => { started = true; };
+  const readOnly = { enabled: false, enables: 0, disables: 0,
+    async enable() { this.enabled = true; this.enables++; },
+    async disable() { this.enabled = false; this.disables++; } };
+  c.editorReadOnly = readOnly;
   for (const launch of ['startDebugSession', 'compileAndQuickRun']) {
     const startIndex = pending.length;
     const launching = c[launch]();
@@ -118,6 +136,20 @@ async function testModeCompile() {
     await launching;
     assert.strictEqual(started, false, launch + ' must not start after cancellation');
     assert.strictEqual(snapshots.at(-1).isCompiling, false);
+    assert.strictEqual(readOnly.enabled, false, launch + ' must release read-only on cancellation');
   }
+  let buildIndex = pending.length;
+  let failure = c.startDebugSession();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.strictEqual(readOnly.enabled, true, 'source is locked before compilation');
+  pending[buildIndex].resolve({ success: false });
+  await failure;
+  assert.strictEqual(readOnly.enabled, false, 'compilation failure unlocks editor');
+  buildIndex = pending.length;
+  failure = c.startDebugSession();
+  await new Promise(resolve => setImmediate(resolve));
+  pending[buildIndex].reject(new Error('compiler error'));
+  await assert.rejects(failure, /compiler error/);
+  assert.strictEqual(readOnly.enabled, false, 'compiler exception unlocks editor');
 }
 module.exports = { testModeCompile };

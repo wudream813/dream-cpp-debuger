@@ -309,10 +309,10 @@ async function runAllTests() {
   assert.ok(sidebarHtml.includes('文件输入'));
   assert.ok(sidebarHtml.includes('程序输出 (stdout / stderr)'));
   assert.ok(sidebarHtml.includes('编译并开始 GDB 调试'));
-  assert.ok(!sidebarHtml.includes('localsContainer'), 'Left sidebar should only hold compile/run and stdin/stdout');
+  assert.ok(!sidebarHtml.includes('localsContainer'), 'Left sidebar should only hold debug launch and stdin/stdout');
   assert.ok(sidebarHtml.includes('body.vscode-light'));
   assert.ok(sidebarHtml.includes('diag-warning'));
-  ok('Left Sidebar (getSidebarHtml) holds Compile/Run controls + 3-mode Stdin (Text / Stream / File) & Stdout I/O');
+  ok('Left Sidebar holds debug launch + 3-mode Stdin (Text / Stream / File) & Stdout I/O');
 
   // Verify CodeLens removed and Activity Bar icon is smooth circle
   const extCode = fs.readFileSync(path.join(__dirname, '..', 'extension.js'), 'utf8');
@@ -570,6 +570,9 @@ int main() {
 
   await require('./mode-compile-tests').testModeCompile();
   ok('Beginner/expert UI, persistent selection and serialized compile progress/cancellation');
+
+  await require('./editor-readonly-tests').testEditorReadOnly();
+  ok('Debug source editor read-only lifecycle, restoration and restart races');
 
   console.log(`\n🎉 All ${passed} tests passed!`);
 }

@@ -2,13 +2,13 @@
   "name": "dream-cpp-debuger",
   "displayName": "Dream C++ Debugger (GDB)",
   "description": "现代简洁的 C/C++ GDB 调试器扩展 —— 零配置一键编译调试、现代化侧边栏面板、STL/数组可视化、条件断点、标准输入(stdin)注入与行内变量实时预览。",
-  "version": "1.1.15",
+  "version": "1.1.16",
   "publisher": "wudream",
   "author": {
     "name": "wudream813"
   },
   "engines": {
-    "vscode": "^1.75.0"
+    "vscode": "^1.79.0"
   },
   "categories": [
     "Debuggers",
@@ -50,7 +50,7 @@
       "dream-cpp-debug": [
         {
           "id": "dream-cpp-debug.sidebar",
-          "name": "编译运行与标准输入 (I/O)",
+          "name": "调试与标准输入输出 (I/O)",
           "type": "webview",
           "visibility": "visible"
         }
@@ -156,11 +156,6 @@
         "icon": "$(debug-alt)"
       },
       {
-        "command": "dream-cpp-debug.compileAndRun",
-        "title": "Dream C++ Debug: 快速编译并运行",
-        "icon": "$(play)"
-      },
-      {
         "command": "dream-cpp-debug.continue",
         "title": "Dream C++ Debug: 继续运行 (Continue)",
         "icon": "$(debug-continue)"
@@ -236,11 +231,6 @@
           "command": "dream-cpp-debug.startDebug",
           "when": "editorLangId == cpp || editorLangId == c",
           "group": "navigation@1"
-        },
-        {
-          "command": "dream-cpp-debug.compileAndRun",
-          "when": "editorLangId == cpp || editorLangId == c",
-          "group": "navigation@2"
         },
         {
           "command": "dream-cpp-debug.stepOver",
@@ -340,6 +330,20 @@
     "configuration": {
       "title": "Dream C++ Debugger (GDB)",
       "properties": {
+        "dreamCppDebug.interfaceMode": {
+          "type": "string",
+          "scope": "application",
+          "enum": [
+            "beginner",
+            "expert"
+          ],
+          "enumDescriptions": [
+            "新手：简化操作并隐藏高级调试区。",
+            "老手：显示完整调试功能。"
+          ],
+          "default": "expert",
+          "description": "调试界面模式。可在此处或扩展侧栏切换。"
+        },
         "dreamCppDebug.gdbPath": {
           "type": "string",
           "default": "gdb",

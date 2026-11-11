@@ -463,9 +463,6 @@ function getSidebarHtml(options = {}) {
           <span id="startDebugLabel">🐞 编译并开始 GDB 调试 (右侧展开)</span>
         </button>
         <div class="btn-row">
-          <button id="btnQuickRun" class="btn btn-run" title="快速编译并带入下方 stdin 直接运行">
-            <span id="quickRunLabel">⚡ 编译运行</span>
-          </button>
           <button id="btnOpenDashboard" class="btn" title="在当前窗格右半边打开调试工作台页面">
             <span id="dashboardLabel">🖥 右侧调试台</span>
           </button>
@@ -558,12 +555,10 @@ function getSidebarHtml(options = {}) {
         compileProgress: document.getElementById('compileProgress'),
         btnUserMode: document.getElementById('btnUserMode'),
         startDebugLabel: document.getElementById('startDebugLabel'),
-        quickRunLabel: document.getElementById('quickRunLabel'),
         dashboardLabel: document.getElementById('dashboardLabel'),
         stdinTitle: document.getElementById('stdinTitle'),
         outputTitle: document.getElementById('outputTitle'),
         btnStartDebug: document.getElementById('btnStartDebug'),
-        btnQuickRun: document.getElementById('btnQuickRun'),
         btnOpenDashboard: document.getElementById('btnOpenDashboard'),
         stdinTextarea: document.getElementById('stdinTextarea'),
         btnClearStdin: document.getElementById('btnClearStdin'),
@@ -617,19 +612,6 @@ function getSidebarHtml(options = {}) {
         }
         vscode.postMessage({
           type: 'startDebug',
-          stdinMode: currentStdinMode,
-          stdin: el.stdinTextarea.value,
-          stdinFile: el.stdinFilePathInput.value.trim()
-        });
-      });
-
-      el.btnQuickRun.addEventListener('click', () => {
-        if (currentStdinMode === 'stream') {
-          streamHistoryText = '';
-          el.streamHistoryBox.textContent = '流式通道已就绪，请在上方输入框发送数据...';
-        }
-        vscode.postMessage({
-          type: 'compileAndRun',
           stdinMode: currentStdinMode,
           stdin: el.stdinTextarea.value,
           stdinFile: el.stdinFilePathInput.value.trim()
@@ -766,13 +748,11 @@ function getSidebarHtml(options = {}) {
         const beginner = snap.userMode === 'beginner';
         el.btnUserMode.textContent = beginner ? '模式：新手' : '模式：老手';
         el.startDebugLabel.textContent = beginner ? '🐞 开始调试' : '🐞 编译并开始 GDB 调试 (右侧展开)';
-        el.quickRunLabel.textContent = beginner ? '⚡ 运行程序' : '⚡ 编译运行';
         el.dashboardLabel.textContent = beginner ? '🖥 打开调试台' : '🖥 右侧调试台';
         el.stdinTitle.textContent = beginner ? '📥 程序输入' : '📥 标准输入 (stdin)';
         el.outputTitle.textContent = beginner ? '📤 程序输出' : '📤 程序输出 (stdout / stderr)';
         el.compileProgress.hidden = !isCompiling;
         el.btnStartDebug.disabled = isCompiling;
-        el.btnQuickRun.disabled = isCompiling;
         if (isCompiling && !wasCompiling) el.compileDiagnostics.innerHTML = '';
         wasCompiling = isCompiling;
 

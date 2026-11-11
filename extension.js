@@ -18,6 +18,7 @@ const { isSourceFile, compileSourceFile, runExecutable } = require('./src/compil
 const { getSidebarHtml } = require('./src/sidebarHtml');
 const { getDashboardHtml } = require('./src/dashboardHtml');
 const { DreamGdbDebugAdapter } = require('./src/debugAdapter');
+const { EditorReadOnly } = require('./src/editorReadOnly');
 
 class DreamSidebarProvider {
   constructor(context, controller) {
@@ -63,10 +64,16 @@ class DreamDebugController {
   constructor(context) {
     this.context = context;
     this.config = vscode.workspace.getConfiguration('dreamCppDebug');
-    this.userMode = context.globalState.get('dreamCppDebug.userMode') === 'beginner' ? 'beginner' : 'expert';
-    this.modeWasSelected = ['beginner', 'expert'].includes(context.globalState.get('dreamCppDebug.userMode'));
+    const configured = this.config.inspect('interfaceMode')?.globalValue;
+    const legacy = context.globalState.get('dreamCppDebug.userMode');
+    this.userMode = ['beginner', 'expert'].includes(configured) ? configured : (legacy === 'beginner' ? 'beginner' : 'expert');
+    this.modeWasSelected = ['beginner', 'expert'].includes(configured) || ['beginner', 'expert'].includes(legacy);
+    this.legacyModeToMigrate = ['beginner', 'expert'].includes(legacy) ? legacy : null;
+    this.modeRevision = 0;
     this.modePromptShown = false;
     this.modePrompt = null;
+    this.editorReadOnly = new EditorReadOnly(vscode);
+    this.preparingDebugRunId = null;
     this.compilingRunId = null;
     this.compileQueue = Promise.resolve();
     this.session = new GDBSession({
@@ -127,7 +134,27 @@ class DreamDebugController {
     this._bindSessionEvents();
   }
 
+  syncUserModeFromConfig() {
+    this.modeRevision = (this.modeRevision || 0) + 1;
+    this.modeWasSelected = true;
+    this.legacyModeToMigrate = null;
+    void this.context.globalState.update('dreamCppDebug.userMode', undefined).catch(() => {});
+    this.userMode = vscode.workspace.getConfiguration('dreamCppDebug').get('interfaceMode', 'expert');
+    this.pushSnapshotToWebview();
+  }
+
   async ensureUserMode() {
+    if (this.legacyModeToMigrate) {
+      const legacy = this.legacyModeToMigrate;
+      this.legacyModeToMigrate = null;
+      const config = vscode.workspace.getConfiguration('dreamCppDebug');
+      try {
+        if (!config.inspect('interfaceMode')?.globalValue) {
+          await config.update('interfaceMode', legacy, vscode.ConfigurationTarget.Global);
+        }
+        await this.context.globalState.update('dreamCppDebug.userMode', undefined);
+      } catch (_) { vscode.window.showWarningMessage('无法将旧模式迁移到 VS Code 设置，请在设置中手动选择。'); }
+    }
     if (this.modeWasSelected || this.modePromptShown) return;
     this.modePromptShown = true;
     await this.chooseUserMode();
@@ -135,17 +162,20 @@ class DreamDebugController {
 
   async chooseUserMode() {
     if (this.modePrompt) return this.modePrompt;
+    const revision = this.modeRevision || 0;
     const task = (async () => {
       const choice = await vscode.window.showQuickPick([
         { label: '🌱 新手模式', description: '简洁、通俗', detail: '隐藏 GDB 命令、寄存器和断点管理；仍可在编辑器设置断点。', mode: 'beginner' },
         { label: '🛠 老手模式', description: '完整功能', detail: '保留 GDB 命令、寄存器和断点管理等高级功能。', mode: 'expert' }
       ], { title: '选择调试界面模式', placeHolder: '以后可在侧栏随时切换；取消时暂用老手模式', ignoreFocusOut: true });
-      if (!choice || !['beginner', 'expert'].includes(choice.mode)) return;
-      this.userMode = choice.mode;
-      this.modeWasSelected = true;
-      try { await this.context.globalState.update('dreamCppDebug.userMode', choice.mode); }
-      catch (_) { vscode.window.showWarningMessage('模式设置未能保存，本次会话仍可使用。'); }
-      this.pushSnapshotToWebview();
+      if (!choice || !['beginner', 'expert'].includes(choice.mode) || revision !== (this.modeRevision || 0)) return;
+      try {
+        await vscode.workspace.getConfiguration('dreamCppDebug').update('interfaceMode', choice.mode, vscode.ConfigurationTarget.Global);
+        this.userMode = choice.mode;
+        this.modeWasSelected = true;
+        await this.context.globalState.update('dreamCppDebug.userMode', undefined);
+        this.pushSnapshotToWebview();
+      } catch (_) { vscode.window.showWarningMessage('模式设置未能保存，请在 VS Code 设置中重试。'); }
     })();
     this.modePrompt = task;
     try { await task; } finally { if (this.modePrompt === task) this.modePrompt = null; }
@@ -235,6 +265,11 @@ class DreamDebugController {
       vscode.commands.executeCommand('setContext', 'dreamCppDebug.paused', isPaused);
 
       this.updateStatusBar(ev.state, ev.location);
+      if (isActive) {
+        if (!this.editorReadOnly.enabled) void this.editorReadOnly.enable().catch(() => {});
+      } else if (this.preparingDebugRunId !== this.runId && this.compilingRunId !== this.runId) {
+        void this.editorReadOnly.disable().catch(() => {});
+      }
 
       if (isPaused && ev.location && ev.location.file) {
         await this.revealLocationInEditor(ev.location.file, ev.location.line || 1, true);
@@ -395,8 +430,9 @@ class DreamDebugController {
 
     // Save dirty document before compiling
     const openDoc = vscode.workspace.textDocuments.find((d) => d.fileName === sourceFile);
-    if (openDoc && openDoc.isDirty) {
-      await openDoc.save();
+    if (openDoc && openDoc.isDirty && !(await openDoc.save())) {
+      if (runId === this.runId) vscode.window.showWarningMessage('源文件未能保存，已取消调试。');
+      return;
     }
 
     this.sidebarProvider.reveal();
@@ -410,57 +446,72 @@ class DreamDebugController {
     this.resettingRunId = null;
     this.pushSnapshotToWebview();
 
-    this.statusBarItem.text = '$(sync~spin) 正在编译 C++ 源码...';
-    this.outputChannel.appendLine(`[Dream Compiler] 正在编译: ${sourceFile}`);
-
-    const compileResult = await this.compileWithProgress(sourceFile, {
-      vectorHelpers: true,
-      compilerPath: this.config.get('compilerPath', 'g++'),
-      compileFlags: this.config.get('compileFlags', ['-g', '-O0', '-std=c++17'])
-    }, runId);
-
-    if (runId !== this.runId) return;
-    this.applyCompilerDiagnostics(sourceFile, compileResult);
-
-    if (!compileResult.success) {
-      this.updateStatusBar('idle');
-      vscode.window.showErrorMessage(`编译失败 (CE)，请查看左侧边栏或“问题 (Problems)”面板中的错误详情。`);
-      return;
-    }
-
-    this.outputChannel.appendLine(
-      `[Dream Compiler] 编译成功 (${compileResult.durationMs} ms) -> ${compileResult.executable}`
-    );
-
-    // Automatically open the spacious Debug Dashboard in the right half of the current editor window
-    this.openDashboardPanel(true);
-
-    this.session.gdbPath = this.config.get('gdbPath', 'gdb');
-    this.session.maxArrayPreview = this.config.get('maxArrayPreview', 16);
-
-    let outputCapture = null;
+    this.preparingDebugRunId = runId;
     try {
-      if (selectedOutputFile) {
-        if (process.platform !== 'linux') throw new Error('调试输出到文件目前仅支持 Linux');
-        outputCapture = await openOutputFile(selectedOutputFile, [sourceFile, resolvedStdinFile, compileResult.executable], { shouldProceed: () => runId === this.runId });
-        if (runId !== this.runId) { await outputCapture.close(); return; }
+      if (this.editorReadOnly) await this.editorReadOnly.enable();
+      if (runId !== this.runId) return;
+      if (openDoc && openDoc.isDirty && !(await openDoc.save())) {
+        vscode.window.showWarningMessage('源文件未能保存，已取消调试。');
+        return;
       }
-      await this.session.start({
-        outputCapture,
-        executable: compileResult.executable,
-        sourceFile,
-        cwd: path.dirname(sourceFile),
-        stdinMode: this.stdinMode,
-        stdin: this.stdinMode === 'text' ? this.stdinText : '',
-        stdinFile: resolvedStdinFile,
-        stopAtMain: this.config.get('stopAtMain', true)
-      });
-    } catch (err) {
-      if (runId === this.runId) {
-        await this.session.stop();
-        vscode.window.showErrorMessage(`启动调试失败: ${err.message}`);
+      if (runId !== this.runId) return;
+      this.statusBarItem.text = '$(sync~spin) 正在编译 C++ 源码...';
+      this.outputChannel.appendLine(`[Dream Compiler] 正在编译: ${sourceFile}`);
+
+      const compileResult = await this.compileWithProgress(sourceFile, {
+        vectorHelpers: true,
+        compilerPath: this.config.get('compilerPath', 'g++'),
+        compileFlags: this.config.get('compileFlags', ['-g', '-O0', '-std=c++17'])
+      }, runId);
+
+      if (runId !== this.runId) return;
+      this.applyCompilerDiagnostics(sourceFile, compileResult);
+
+      if (!compileResult.success) {
+        this.updateStatusBar('idle');
+        vscode.window.showErrorMessage(`编译失败 (CE)，请查看左侧边栏或“问题 (Problems)”面板中的错误详情。`);
+        return;
       }
-      if (outputCapture) await outputCapture.close().catch(() => {});
+
+      this.outputChannel.appendLine(
+        `[Dream Compiler] 编译成功 (${compileResult.durationMs} ms) -> ${compileResult.executable}`
+      );
+
+      // Automatically open the spacious Debug Dashboard in the right half of the current editor window
+      this.openDashboardPanel(true);
+
+      this.session.gdbPath = this.config.get('gdbPath', 'gdb');
+      this.session.maxArrayPreview = this.config.get('maxArrayPreview', 16);
+
+      let outputCapture = null;
+      try {
+        if (selectedOutputFile) {
+          if (process.platform !== 'linux') throw new Error('调试输出到文件目前仅支持 Linux');
+          outputCapture = await openOutputFile(selectedOutputFile, [sourceFile, resolvedStdinFile, compileResult.executable], { shouldProceed: () => runId === this.runId });
+          if (runId !== this.runId) { await outputCapture.close(); return; }
+        }
+        await this.session.start({
+          outputCapture,
+          executable: compileResult.executable,
+          sourceFile,
+          cwd: path.dirname(sourceFile),
+          stdinMode: this.stdinMode,
+          stdin: this.stdinMode === 'text' ? this.stdinText : '',
+          stdinFile: resolvedStdinFile,
+          stopAtMain: this.config.get('stopAtMain', true)
+        });
+      } catch (err) {
+        if (runId === this.runId) {
+          await this.session.stop();
+          vscode.window.showErrorMessage(`启动调试失败: ${err.message}`);
+        }
+        if (outputCapture) await outputCapture.close().catch(() => {});
+      }
+    } finally {
+      if (this.preparingDebugRunId === runId) this.preparingDebugRunId = null;
+      if (runId === this.runId && this.editorReadOnly && !['starting', 'running', 'paused'].includes(this.session.state)) {
+        await this.editorReadOnly.disable();
+      }
     }
   }
 
@@ -614,7 +665,7 @@ class DreamDebugController {
   }
 
   async stopExecution() {
-    if (this.quickRunId === this.runId || this.compilingRunId === this.runId) {
+    if (this.quickRunId === this.runId || this.compilingRunId === this.runId || this.preparingDebugRunId === this.runId) {
       ++this.runId; // invalidate pending compile/start and late output callbacks
       this.quickRunId = null;
       this.compilingRunId = null;
@@ -625,6 +676,7 @@ class DreamDebugController {
     }
     this.cancelActiveRun();
     await this.session.stop();
+    if (this.editorReadOnly) await this.editorReadOnly.disable();
   }
 
   sendStreamStdin(text) {
@@ -798,13 +850,6 @@ class DreamDebugController {
         break;
       case 'startDebug':
         await this.startDebugSession({
-          stdinMode: msg.stdinMode,
-          stdin: msg.stdin,
-          stdinFile: msg.stdinFile
-        });
-        break;
-      case 'compileAndRun':
-        await this.compileAndQuickRun({
           stdinMode: msg.stdinMode,
           stdin: msg.stdin,
           stdinFile: msg.stdinFile
@@ -1000,6 +1045,7 @@ class DreamDebugController {
     this.quickRunId = null;
     this.cancelActiveRun();
     this.session.stop();
+    if (this.editorReadOnly) void this.editorReadOnly.disable().catch(() => {});
     if (this.dashboardPanel) {
       this.dashboardPanel.dispose();
     }
@@ -1032,6 +1078,8 @@ function activate(context) {
   // 3. Track active C/C++ editor changes
   context.subscriptions.push(
     vscode.window.onDidChangeActiveTextEditor((editor) => {
+      if (controller.editorReadOnly.cleaning) return;
+      void controller.editorReadOnly.onActiveEditorChanged().catch(() => {});
       if (editor && editor.document && isSourceFile(editor.document.fileName)) {
         controller.lastTargetFile = editor.document.fileName;
         controller.pushSnapshotToWebview();
@@ -1041,6 +1089,11 @@ function activate(context) {
       }
     })
   );
+
+  context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((event) => {
+    if (!event.affectsConfiguration('dreamCppDebug.interfaceMode')) return;
+    controller.syncUserModeFromConfig();
+  }));
 
   // 4. Register Hover Evaluator during paused GDB session
   context.subscriptions.push(
@@ -1106,7 +1159,6 @@ function activate(context) {
   };
 
   register('dream-cpp-debug.startDebug', () => controller.startDebugSession());
-  register('dream-cpp-debug.compileAndRun', () => controller.compileAndQuickRun());
   register('dream-cpp-debug.openDashboard', () => controller.openDashboardPanel(false));
   register('dream-cpp-debug.continue', () => controller.session.continue());
   register('dream-cpp-debug.pause', () => controller.session.pause());

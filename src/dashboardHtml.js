@@ -357,6 +357,8 @@ function getDashboardHtml(options = {}) {
       display: flex;
       align-items: center;
       gap: 8px;
+      min-width: 0;
+      max-width: 100%;
     }
 
     .var-name {
@@ -374,6 +376,12 @@ function getDashboardHtml(options = {}) {
       border-radius: 5px;
       background: var(--var-type-bg);
       color: var(--var-type-fg);
+      display: inline-block;
+      min-width: 0;
+      max-width: min(32ch, 45vw);
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
     }
 
     .var-changed-tag {
@@ -874,8 +882,8 @@ function getDashboardHtml(options = {}) {
             '<div class="var-main">' +
               '<div class="var-left">' +
                 '<span class="var-name">' + escapeHtml(v.displayName || v.name || v.expr) + '</span>' +
-                (v.sourceLabel ? '<span class="var-type">' + escapeHtml(v.sourceLabel) + '</span>' : '') +
-                (v.type ? '<span class="var-type">' + escapeHtml(v.type) + '</span>' : '') +
+                (v.sourceLabel ? '<span class="var-type" title="' + escapeHtml(v.sourceLabel) + '">' + escapeHtml(v.sourceLabel) + '</span>' : '') +
+                (v.type ? '<span class="var-type" title="' + escapeHtml(v.type) + '">' + escapeHtml(v.type) + '</span>' : '') +
                 (v.changed ? '<span class="var-changed-tag">已更新</span>' : '') +
               '</div>' +
               '<div class="var-right">' +
