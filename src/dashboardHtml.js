@@ -887,7 +887,7 @@ function getDashboardHtml(options = {}) {
                 (v.changed ? '<span class="var-changed-tag">已更新</span>' : '') +
               '</div>' +
               '<div class="var-right">' +
-                '<span class="var-val ' + valClass + '">' + escapeHtml(v.displayValue ?? v.value) + '</span>' +
+                '<span class="var-val ' + valClass + '"' + (v.tooltip ? ' title="' + escapeHtml(v.tooltip) + '"' : '') + '>' + escapeHtml(v.displayValue ?? v.value) + '</span>' +
                 actionBtn +
               '</div>' +
             '</div>' +

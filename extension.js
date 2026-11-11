@@ -224,8 +224,8 @@ class DreamDebugController {
     const revision = this.modeRevision || 0;
     const task = (async () => {
       const choice = await vscode.window.showQuickPick([
-        { label: '🌱 新手模式', description: '简洁、通俗', detail: '隐藏 GDB 命令、寄存器和断点管理；仍可在编辑器设置断点。', mode: 'beginner' },
-        { label: '🛠 老手模式', description: '完整功能', detail: '保留 GDB 命令、寄存器和断点管理等高级功能。', mode: 'expert' }
+        { label: '新手模式', description: '简洁、通俗', detail: '隐藏 GDB 命令、寄存器和断点管理；仍可在编辑器设置断点。', mode: 'beginner' },
+        { label: '老手模式', description: '完整功能', detail: '保留 GDB 命令、寄存器和断点管理等高级功能。', mode: 'expert' }
       ], { title: '选择调试界面模式', placeHolder: '以后可在侧栏或 VS Code 设置中切换', ignoreFocusOut: true });
       if (!choice || !['beginner', 'expert'].includes(choice.mode) || revision !== (this.modeRevision || 0)) return;
       await this.setUserMode(choice.mode);
@@ -413,7 +413,7 @@ class DreamDebugController {
     try {
       const { stat, text } = await readRegularPrefix(resolved, 512);
       const sizeStr = stat.size > 1024 ? `${(stat.size / 1024).toFixed(1)} KB` : `${stat.size} B`;
-      preview = `📄 ${path.basename(resolved)} (${sizeStr})\n` +
+      preview = `${path.basename(resolved)} (${sizeStr})\n` +
         `────────────────────────\n${text}${stat.size > 512 ? '\n...(后略)' : ''}`;
       valid = true;
     } catch (err) {
@@ -895,9 +895,6 @@ class DreamDebugController {
     if (!msg || !msg.type) return;
 
     switch (msg.type) {
-      case 'openModeSettings':
-        await this.openModeSettings();
-        break;
       case 'changeUserMode':
         await this.chooseUserMode();
         break;

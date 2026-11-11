@@ -1,11 +1,11 @@
 /**
  * Dream C++ Debugger — Streamlined Left Sidebar Webview UI
  * Left sidebar focuses exclusively on:
- *   1. One-click Compile & GDB Debug / Quick Compile & Run
+ *   1. One-click Compile & GDB Debug
  *   2. Standard Input (stdin) supporting 3 modes:
- *      - 📝 文本预设 (Preset Text)
- *      - 🌊 流式输入 (Live Streaming Stdin — send lines interactively during execution/debug)
- *      - 📂 从文件输入 (File Stdin — pick or enter any .in / .txt file)
+ *      - 文本预设 (Preset Text)
+ *      - 流式输入 (Live Streaming Stdin — send lines interactively during execution/debug)
+ *      - 从文件输入 (File Stdin — pick or enter any .in / .txt file)
  *   3. Live Program Output (stdout / stderr)
  */
 'use strict';
@@ -458,13 +458,13 @@ function getSidebarHtml(options = {}) {
     <div class="card-body">
       <div id="compileProgress" class="compile-progress" role="status" aria-live="polite" hidden><span class="compile-spinner" aria-hidden="true"></span><span>正在编译，请稍候…</span></div>
       <div id="compileDiagnostics"></div>
-      <div style="display:flex;justify-content:flex-end;gap:6px;margin-bottom:8px;"><button id="btnModeSettings" class="small-action" title="在 VS Code 设置中调整界面模式">模式设置</button><button id="btnUserMode" class="small-action" title="切换新手或老手界面">模式：老手</button></div>
+      <div style="display:flex;justify-content:flex-end;margin-bottom:8px;"><button id="btnUserMode" class="small-action" title="切换新手或老手界面">模式：老手</button></div>
       <div class="btn-row">
         <button id="btnStartDebug" class="btn btn-primary" title="编译并开始 GDB 调试 (Ctrl+Shift+F5)">
-          <span id="startDebugLabel">🐞 开始调试</span>
+          <span id="startDebugLabel">开始调试</span>
         </button>
         <button id="btnOpenDashboard" class="btn" title="在当前窗格右半边打开调试工作台页面">
-          <span id="dashboardLabel">🖥 调试台</span>
+          <span id="dashboardLabel">调试台</span>
         </button>
       </div>
     </div>
@@ -473,14 +473,14 @@ function getSidebarHtml(options = {}) {
   <!-- 2. Standard Input (stdin) Card with 3 Modes: Text / Stream / File -->
   <div class="card">
     <div class="card-header">
-      <span id="stdinTitle">📥 标准输入 (stdin)</span>
+      <span id="stdinTitle">标准输入 (stdin)</span>
       <button id="btnClearStdin" class="small-action" title="清空当前输入">清空</button>
     </div>
     <div class="card-body">
       <div class="mode-tabs">
-        <button class="mode-tab active" data-mode="text" title="运行前一次性预设全部输入文本">📝 文本预设</button>
-        <button class="mode-tab" data-mode="stream" title="边运行/调试边实时发送每一行流式输入">🌊 流式输入</button>
-        <button class="mode-tab" data-mode="file" title="直接从本地 .in / .txt 文件重定向输入">📂 文件输入</button>
+        <button class="mode-tab active" data-mode="text" title="运行前一次性预设全部输入文本">文本预设</button>
+        <button class="mode-tab" data-mode="stream" title="边运行/调试边实时发送每一行流式输入">流式输入</button>
+        <button class="mode-tab" data-mode="file" title="直接从本地 .in / .txt 文件重定向输入">文件输入</button>
       </div>
 
       <!-- Mode 1: Text Preset -->
@@ -508,7 +508,7 @@ function getSidebarHtml(options = {}) {
       <div id="pane-file" class="mode-pane">
         <div class="btn-stack">
           <button id="btnPickStdinFile" class="btn" style="width: 100%;">
-            <span>📂 选择本地输入文件 (.in / .txt)...</span>
+            <span>选择本地输入文件 (.in / .txt)...</span>
           </button>
           <input id="stdinFilePathInput" class="text-input" type="text" placeholder="或直接输入文件路径（如 input.in）..." />
         </div>
@@ -520,7 +520,7 @@ function getSidebarHtml(options = {}) {
   <!-- 3. Program Output (stdout / stderr) Card -->
   <div class="card">
     <div class="card-header">
-      <span id="outputTitle">📤 程序输出 (stdout / stderr)</span>
+      <span id="outputTitle">程序输出 (stdout / stderr)</span>
       <div style="display:flex;gap:5px;">
         <button id="btnCopyStdout" class="small-action" title="复制输出结果">复制</button>
         <button id="btnClearStdout" class="small-action" title="清空输出">清空</button>
@@ -528,7 +528,7 @@ function getSidebarHtml(options = {}) {
     </div>
     <div class="card-body">
       <div class="btn-row" style="margin-bottom:7px;">
-        <button id="btnPickOutputFile" class="btn">📁 选择输出文件</button>
+        <button id="btnPickOutputFile" class="btn">选择输出文件</button>
         <button id="btnClearOutputFile" class="btn">仅显示输出</button>
       </div>
       <div id="outputFileInfo" class="file-info-box">当前仅显示输出；选择文件后，每次运行覆盖文件。</div>
@@ -553,7 +553,6 @@ function getSidebarHtml(options = {}) {
         compileDiagnostics: document.getElementById('compileDiagnostics'),
         compileProgress: document.getElementById('compileProgress'),
         btnUserMode: document.getElementById('btnUserMode'),
-        btnModeSettings: document.getElementById('btnModeSettings'),
         startDebugLabel: document.getElementById('startDebugLabel'),
         dashboardLabel: document.getElementById('dashboardLabel'),
         stdinTitle: document.getElementById('stdinTitle'),
@@ -604,7 +603,6 @@ function getSidebarHtml(options = {}) {
       });
 
       el.btnUserMode.addEventListener('click', () => vscode.postMessage({ type: 'changeUserMode' }));
-      el.btnModeSettings.addEventListener('click', () => vscode.postMessage({ type: 'openModeSettings' }));
 
       el.btnStartDebug.addEventListener('click', () => {
         if (currentStdinMode === 'stream') {
@@ -748,10 +746,10 @@ function getSidebarHtml(options = {}) {
         const isRunning = state === 'running' || state === 'starting' || !!snap.quickRunning;
         const beginner = snap.userMode === 'beginner';
         el.btnUserMode.textContent = beginner ? '模式：新手' : '模式：老手';
-        el.startDebugLabel.textContent = '🐞 开始调试';
-        el.dashboardLabel.textContent = '🖥 调试台';
-        el.stdinTitle.textContent = beginner ? '📥 程序输入' : '📥 标准输入 (stdin)';
-        el.outputTitle.textContent = beginner ? '📤 程序输出' : '📤 程序输出 (stdout / stderr)';
+        el.startDebugLabel.textContent = '开始调试';
+        el.dashboardLabel.textContent = '调试台';
+        el.stdinTitle.textContent = beginner ? '程序输入' : '标准输入 (stdin)';
+        el.outputTitle.textContent = beginner ? '程序输出' : '程序输出 (stdout / stderr)';
         el.compileProgress.hidden = !isCompiling;
         el.btnStartDebug.disabled = isCompiling;
         if (isCompiling && !wasCompiling) el.compileDiagnostics.innerHTML = '';

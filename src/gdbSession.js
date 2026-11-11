@@ -1610,7 +1610,7 @@ class GDBSession extends EventEmitter {
           if (!same()) return;
           entries.push({ name: sym.id, displayName: sym.name, expression: sym.expression, type: sym.type,
             sourceLabel: path.basename(sym.file) + (sym.line ? ':' + sym.line : ''), kind: 'uninitialized',
-            displayValue: '无法读取（可能未初始化或已被优化）', elements: null, changed: false });
+            displayValue: '无法读取', tooltip: '可能未初始化或已被优化', elements: null, changed: false });
         }
       }
       if (same()) this.globals = entries;

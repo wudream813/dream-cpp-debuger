@@ -29,10 +29,9 @@ async function testModeCompile() {
   assert.strictEqual(id(S, 'btnStartDebug').disabled, true);
   assert.strictEqual(id(S, 'btnQuickRun'), null);
   assert.strictEqual(id(S, 'btnStartDebug').parentElement, id(S, 'btnOpenDashboard').parentElement);
-  assert.strictEqual(id(S, 'startDebugLabel').textContent, '🐞 开始调试');
-  assert.strictEqual(id(S, 'dashboardLabel').textContent, '🖥 调试台');
-  id(S, 'btnModeSettings').click();
-  assert.strictEqual(messages.at(-1).type, 'openModeSettings');
+  assert.strictEqual(id(S, 'startDebugLabel').textContent, '开始调试');
+  assert.strictEqual(id(S, 'dashboardLabel').textContent, '调试台');
+  assert.strictEqual(id(S, 'btnModeSettings'), null, 'no extra settings button');
   assert.strictEqual(id(D, 'btnStop').disabled, false);
   assert.strictEqual(id(D, 'breakpointCard').hidden, true);
   assert.strictEqual(id(D, 'advancedCard').hidden, true);
@@ -55,6 +54,15 @@ async function testModeCompile() {
   assert.strictEqual(tag.title, fullType);
   assert.strictEqual(tag.textContent, fullType);
   assert.strictEqual(dashboard.window.getComputedStyle(tag).textOverflow, 'ellipsis');
+  send(dashboard, { runId: 1, userMode: 'expert', state: 'paused', globals: [
+    { name: 'g', type: 'int', kind: 'uninitialized', displayValue: '无法读取', tooltip: '可能未初始化或已被优化' },
+    { name: 'safe', type: 'int', displayValue: '1', tooltip: '" onmouseover="x' }
+  ] });
+  const values = D.querySelectorAll('#globalsContainer .var-val');
+  assert.strictEqual(values[0].textContent, '无法读取');
+  assert.strictEqual(values[0].title, '可能未初始化或已被优化');
+  assert.strictEqual(values[1].title, '" onmouseover="x');
+  assert.strictEqual(values[1].getAttribute('onmouseover'), null, 'tooltip must be escaped');
   id(D, 'btnContinue').click();
   assert.strictEqual(messages.at(-1).type, 'continue');
   assert.deepStrictEqual(errors, []);

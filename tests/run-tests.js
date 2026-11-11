@@ -312,6 +312,14 @@ async function runAllTests() {
   assert.ok(!sidebarHtml.includes('localsContainer'), 'Left sidebar should only hold debug launch and stdin/stdout');
   assert.ok(sidebarHtml.includes('body.vscode-light'));
   assert.ok(sidebarHtml.includes('diag-warning'));
+  assert.ok(!sidebarHtml.includes('btnModeSettings'));
+  assert.ok(!/[\u{1F300}-\u{1FAFF}]/u.test(sidebarHtml), 'sidebar should avoid decorative emoji');
+  const manifest = require('../package.json');
+  const contextCommands = new Set(manifest.contributes.menus['editor/context'].map(item => item.command));
+  for (const command of manifest.contributes.commands.filter(item => contextCommands.has(item.command))) {
+    assert.ok(!command.title.startsWith('Dream C++ Debug:'), 'context menu should not repeat extension prefix');
+    assert.equal(command.category, 'Dream C++ Debug', 'keep command palette category');
+  }
   ok('Left Sidebar holds debug launch + 3-mode Stdin (Text / Stream / File) & Stdout I/O');
 
   // Verify CodeLens removed and Activity Bar icon is smooth circle

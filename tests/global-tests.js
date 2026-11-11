@@ -50,5 +50,10 @@ async function testGlobals(){
  fake.sendCommand=async()=>({results:{symbols:{debug:[{fullname:'/tmp/proj/main.cpp',symbols:Array.from({length:105},(_,i)=>({name:'v'+i,type:'int'}))}]}}});
  const capped=await fake._discoverGlobalSymbols();assert.equal(capped.symbols.length,100);assert(capped.info.includes('最多显示 100'));
  fake._globalSymbols=null;fake.sendCommand=async()=>{throw Error('unsupported')};await fake._refreshGlobals();assert(fake.globalsInfo.includes('不支持'));
+ fake._globalSymbols=[{id:'global_0',name:'broken',file:'/tmp/proj/main.cpp',line:4,type:'int',expression:'broken'}];
+ await fake._refreshGlobals();
+ assert.equal(fake.globals[0].displayValue,'无法读取');
+ assert.equal(fake.globals[0].tooltip,'可能未初始化或已被优化');
+ assert.equal(fake.getSnapshot().globals[0].tooltip,'可能未初始化或已被优化');
 }
 module.exports={testGlobals};if(require.main===module)testGlobals().then(()=>console.log('global tests ok')).catch(e=>{console.error(e);process.exitCode=1});

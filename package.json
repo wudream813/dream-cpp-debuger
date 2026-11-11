@@ -2,7 +2,7 @@
   "name": "dream-cpp-debuger",
   "displayName": "Dream C++ Debugger (GDB)",
   "description": "现代简洁的 C/C++ GDB 调试器扩展 —— 零配置一键编译调试、现代化侧边栏面板、STL/数组可视化、条件断点、标准输入(stdin)注入与行内变量实时预览。",
-  "version": "1.1.17",
+  "version": "1.1.18",
   "publisher": "wudream",
   "author": {
     "name": "wudream813"
@@ -192,8 +192,9 @@
       },
       {
         "command": "dream-cpp-debug.runToCursor",
-        "title": "Dream C++ Debug: 运行到光标处 (Run to Cursor)",
-        "icon": "$(debug-step-back)"
+        "title": "运行到光标处 (Run to Cursor)",
+        "icon": "$(debug-step-back)",
+        "category": "Dream C++ Debug"
       },
       {
         "command": "dream-cpp-debug.toggleBreakpoint",
@@ -201,15 +202,18 @@
       },
       {
         "command": "dream-cpp-debug.addConditionalBreakpoint",
-        "title": "Dream C++ Debug: 添加/编辑条件断点..."
+        "title": "添加/编辑条件断点...",
+        "category": "Dream C++ Debug"
       },
       {
         "command": "dream-cpp-debug.addWatch",
-        "title": "Dream C++ Debug: 添加选中表达式到监视 (Add to Watch)"
+        "title": "添加选中表达式到监视 (Add to Watch)",
+        "category": "Dream C++ Debug"
       },
       {
         "command": "dream-cpp-debug.evaluateSelection",
-        "title": "Dream C++ Debug: 立即求值选中表达式 (Evaluate Expression)"
+        "title": "立即求值选中表达式 (Evaluate Expression)",
+        "category": "Dream C++ Debug"
       },
       {
         "command": "dream-cpp-debug.clearBreakpoints",
