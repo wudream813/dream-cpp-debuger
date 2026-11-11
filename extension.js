@@ -786,11 +786,13 @@ class DreamDebugController {
           if (!['left', 'right', 'delete', 'empty'].includes(msg.mode) || !Number.isSafeInteger(msg.revision)) throw new Error('操作无效');
           const anchor = msg.mode === 'empty' ? null : msg.index;
           if (anchor !== null && (!Number.isSafeInteger(anchor) || anchor < 0 || anchor >= Number.MAX_SAFE_INTEGER)) throw new Error('元素索引无效');
+          const currentVar = this.session.locals.find(v => v.name === msg.name);
+          const isString = currentVar?.sequence?.stringOps === true;
           let value = '';
           if (msg.mode !== 'delete') {
             value = await vscode.window.showInputBox({
               prompt: msg.mode === 'empty' ? `向空 ${msg.name} 添加第一个元素` : `在 ${msg.name}[${anchor}] ${msg.mode === 'left' ? '左侧' : '右侧'}插入元素`,
-              placeHolder: msg.isChar ? '单字节字符或 0x00–0xFF' : '输入元素值'
+              placeHolder: isString ? '输入文本、转义序列或 0x00–0xFF（按字节插入）' : msg.isChar ? '单字节字符或 0x00–0xFF' : '输入元素值'
             });
             if (value === undefined) break;
           }
@@ -804,7 +806,7 @@ class DreamDebugController {
           this.postToAllViews({ type: 'sequenceEdited', requestId: msg.requestId, name: msg.name, length: local?.sequence?.length });
         } catch (err) {
           this.postToAllViews({ type: 'sequenceError', requestId: msg.requestId, message: err.message });
-          vscode.window.showErrorMessage(`vector 操作失败：${err.message}`);
+          vscode.window.showErrorMessage(`容器操作失败：${err.message}`);
         }
         break;
       }

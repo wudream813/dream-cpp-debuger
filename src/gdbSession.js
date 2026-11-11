@@ -911,6 +911,7 @@ class GDBSession extends EventEmitter {
         editable: !/(?:^|\s)const(?:\s|$)/.test(rawType) };
       if (isStringElement) sequence.elementEditable = false;
       if (kind === 'vector') sequence.vectorOps = sequence.editable && !!this._vectorElementType(rawType);
+      if (kind === 'string') sequence.stringOps = sequence.editable && rawType.trim() === 'std::string';
       if (kind !== 'string' && kind !== 'chars') {
         const prefix = kind === 'vector' ? `vector[${length}]` : `[${length}]`;
         formatted = { ...formatted, kind: 'array', elements: items.map(item => item.value),
@@ -950,9 +951,10 @@ class GDBSession extends EventEmitter {
     this._assertPauseContext(context);
     if (!/^[A-Za-z_]\w*$/.test(name || '')) throw new Error('只能修改当前栈帧中的局部变量');
     const variable = this.locals.find(v => v.name === name);
-    const type = variable && variable.sequence && variable.sequence.editable && variable.sequence.kind === 'vector'
-      ? this._vectorElementType(variable.type) : null;
-    if (!type) throw new Error('此 vector 类型不支持插入：仅支持默认分配器的基本数值类型和 std::string');
+    const seq = variable && variable.sequence;
+    const isString = !!(seq && seq.kind === 'string' && seq.stringOps);
+    const type = seq && seq.editable && seq.kind === 'vector' ? this._vectorElementType(variable.type) : null;
+    if (!type && !isString) throw new Error('此容器类型不支持插入或删除');
     const deleting = options.delete === true;
     const checkRevision = () => {
       if (options.revision !== undefined && options.revision !== this._vectorRevision) throw new Error('容器内容已变化，请重新选择元素');
@@ -965,8 +967,10 @@ class GDBSession extends EventEmitter {
     let argument;
     if (deleting) {
       argument = '';
-    } else if (type === 'string') {
-      const bytes = Buffer.from(value, 'utf8');
+    } else if (type === 'string' || isString) {
+      let bytes = Buffer.from(value, 'utf8');
+      if (isString && (/^0x[0-9a-f]{1,2}$/i.test(value.trim()) || ['\\0','\\n','\\r','\\t','\\\\',"\\'"].includes(value))) bytes = Buffer.from([this._parseCharacterByte(value)]);
+      if (isString && !bytes.length) throw new Error('请输入要插入的文本或字节');
       if (bytes.length > 4096) throw new Error('字符串不能超过 4096 字节');
       // Octal escapes avoid GDB command injection and preserve the exact UTF-8 bytes.
       const literal = Array.from(bytes, byte => '\\' + byte.toString(8).padStart(3, '0')).join('');
@@ -986,7 +990,7 @@ class GDBSession extends EventEmitter {
     this._vectorMutation = new Promise(resolve => { release = resolve; });
     this._emitSnapshot();
     try {
-      const length = await this._getContainerLength(name, true);
+      const length = await this._sequenceLength(name, isString ? 'string' : 'vector');
       this._assertPauseContext(context);
       checkRevision();
       if (append) idx = length;
@@ -996,12 +1000,14 @@ class GDBSession extends EventEmitter {
       if (idx > length) throw new Error(`插入位置越界（有效范围 0–${length}）`);
       // Reject known ABI/layout mismatches before casting to the helper's vector type.
       // This is particularly important for old vs new libstdc++ std::string ABI.
-      const check = `(sizeof(${name}) == dream_debug_vector_size_${type}) && (sizeof(*${name}._M_impl._M_start) == dream_debug_element_size_${type})`;
+      const check = isString ? `(sizeof(${name}) == dream_debug_string_object_size)` : `(sizeof(${name}) == dream_debug_vector_size_${type}) && (sizeof(*${name}._M_impl._M_start) == dream_debug_element_size_${type})`;
       const layout = await this.sendCommand(`-data-evaluate-expression "${check}"`).catch(err => { throw new Error(`无法验证 vector 辅助代码的 ABI：${err.message}`); });
       this._assertPauseContext(context);
       if (!/^(?:true|1)$/.test(String(layout?.results?.value ?? ''))) throw new Error('vector 与调试助手的 ABI 布局不匹配，已拒绝操作');
       checkRevision();
-      const expression = deleting ? `dream_debug_vector_erase_${type}((void*)&${name}, ${idx})` : `dream_debug_vector_insert_${type}((void*)&${name}, ${idx}, ${argument})`;
+      const expression = isString
+        ? (deleting ? `dream_debug_string_erase((void*)&${name}, ${idx})` : `dream_debug_string_insert((void*)&${name}, ${idx}, ${argument})`)
+        : (deleting ? `dream_debug_vector_erase_${type}((void*)&${name}, ${idx})` : `dream_debug_vector_insert_${type}((void*)&${name}, ${idx}, ${argument})`);
       const escaped = expression.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
       let result;
       try { result = await this.sendCommand(`-data-evaluate-expression "${escaped}"`, 15000); }
@@ -1045,7 +1051,7 @@ class GDBSession extends EventEmitter {
       items.push(await this._readSequenceItem(name, seq.kind, i, seq.isChar, this._vectorElementType(variable.type) === 'string'));
     }
     this._assertPauseContext(context);
-    return { name, offset: start, length, items, isChar: seq.isChar, editable: seq.editable && seq.elementEditable !== false, vectorOps: seq.vectorOps === true, context };
+    return { name, offset: start, length, items, isChar: seq.isChar, editable: seq.editable && seq.elementEditable !== false, vectorOps: seq.vectorOps === true, stringOps: seq.stringOps === true, context };
   }
 
   _parseCharacterByte(input) {
@@ -1158,6 +1164,7 @@ class GDBSession extends EventEmitter {
             `-data-evaluate-expression "${escapeForMI(`${cleanName}._M_string_length = ${byteLen}`)}"`
           );
         }
+        this._vectorRevision++;
         await this.refreshState();
         return true;
       }

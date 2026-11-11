@@ -78,3 +78,26 @@ extern "C" int dream_debug_vector_insert_string(void* p, unsigned long long i, c
 extern "C" int dream_debug_vector_erase_string(void* p, unsigned long long i) noexcept {
   return dream_vector_erase<std::string>(p, i);
 }
+
+// std::string uses byte indexes (including embedded NUL bytes).
+extern "C" {
+unsigned long long dream_debug_string_object_size = sizeof(std::string);
+int dream_debug_string_insert(void* object, unsigned long long index, const char* bytes, unsigned long long size) noexcept {
+  DREAM_TRY {
+    auto& str = *static_cast<std::string*>(object);
+    if (index > str.size()) return -2;
+    str.insert(static_cast<std::size_t>(index), bytes, static_cast<std::size_t>(size));
+    return 0;
+  } DREAM_CATCH
+  return -3;
+}
+int dream_debug_string_erase(void* object, unsigned long long index) noexcept {
+  DREAM_TRY {
+    auto& str = *static_cast<std::string*>(object);
+    if (index >= str.size()) return -2;
+    str.erase(static_cast<std::size_t>(index), 1);
+    return 0;
+  } DREAM_CATCH
+  return -3;
+}
+}

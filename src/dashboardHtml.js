@@ -730,7 +730,7 @@ function getDashboardHtml(options = {}) {
       <div class="sequence-nav"><button class="btn" id="sequencePrev">上一页</button><span id="sequenceRange"></span><button class="btn" id="sequenceNext">下一页</button></div>
     </section>
   </div>
-  <div id="vectorMenu" class="vector-menu" role="menu" aria-label="vector 元素操作" hidden>
+  <div id="vectorMenu" class="vector-menu" role="menu" aria-label="容器元素操作" hidden>
     <button role="menuitem" data-menu-action="left">左侧插入</button>
     <button role="menuitem" data-menu-action="right">右侧插入</button>
     <button role="menuitem" data-menu-action="delete">删除元素</button>
@@ -829,12 +829,12 @@ function getDashboardHtml(options = {}) {
         if (seq) {
           const cells = seq.items.map(item => {
             const editable = seq.editable && seq.elementEditable !== false;
-            const vectorData = seq.vectorOps ? ' data-vector-index="' + item.index + '" data-vector-name="' + escapeHtml(varBaseName) + '" data-vector-char="' + (seq.isChar ? '1' : '0') + '" title="右击：删除或插入"' : '';
-            return '<button class="array-cell" data-seq-index="' + item.index + '" data-seq-name="' + escapeHtml(varBaseName) + '" data-cur-val="' + escapeHtml(item.editValue) + '" data-char="' + (seq.isChar ? '1' : '0') + '" data-editable="' + (editable ? '1' : '0') + '"' + vectorData + (!editable && !seq.vectorOps ? ' disabled' : '') + (!editable ? ' aria-label="此元素不支持修改值；右击可插入或删除"' : '') + '>' +
+            const vectorData = (seq.vectorOps || seq.stringOps) ? ' data-vector-index="' + item.index + '" data-vector-name="' + escapeHtml(varBaseName) + '" data-vector-char="' + (seq.isChar ? '1' : '0') + '" title="右击：删除或插入"' : '';
+            return '<button class="array-cell" data-seq-index="' + item.index + '" data-seq-name="' + escapeHtml(varBaseName) + '" data-cur-val="' + escapeHtml(item.editValue) + '" data-char="' + (seq.isChar ? '1' : '0') + '" data-editable="' + (editable ? '1' : '0') + '"' + vectorData + (!editable && !(seq.vectorOps || seq.stringOps) ? ' disabled' : '') + (!editable ? ' aria-label="此元素不支持修改值；右击可插入或删除"' : '') + '>' +
               '<span class="array-idx">[' + item.index + ']</span><span class="array-v">' + escapeHtml(item.value) + '</span></button>';
           }).join('');
           const more = seq.truncated ? '<button class="array-cell" data-seq-open="' + escapeHtml(varBaseName) + '" data-offset="' + seq.items.length + '" title="分页查看剩余元素">…<span class="array-idx">查看更多</span></button>' : '';
-          const empty = seq.vectorOps && seq.length === 0 ? '<button class="array-cell" data-vector-empty="' + escapeHtml(varBaseName) + '" data-vector-char="' + (seq.isChar ? '1' : '0') + '" title="空 vector：添加第一个元素">＋<span class="array-idx">添加首个元素</span></button>' : '';
+          const empty = (seq.vectorOps || seq.stringOps) && seq.length === 0 ? '<button class="array-cell" data-vector-empty="' + escapeHtml(varBaseName) + '" data-vector-char="' + (seq.isChar ? '1' : '0') + '" title="空容器：添加第一个元素">＋<span class="array-idx">添加首个元素</span></button>' : '';
           arrayHtml = '<div class="array-strip">' + cells + more + empty + '</div>';
         } else if (Array.isArray(v.elements) && v.elements.length && v.kind === 'array') {
           arrayHtml = '<div class="array-strip">' + v.elements.map((item, idx) => '<div class="array-cell"><span class="array-idx">[' + idx + ']</span><span class="array-v">' + escapeHtml(item) + '</span></div>').join('') + '</div>';
@@ -1125,10 +1125,10 @@ function getDashboardHtml(options = {}) {
           renderSnapshot(msg.snapshot);
         } else if (msg.type === 'sequencePage' && sequenceState && msg.requestId === sequenceRequest && sameContext(sequenceState.context, currentContext)) {
           const page = msg.page;
-          sequenceMessage.textContent = page.isChar ? '按字节索引；UTF-8 多字节字符会显示为多个字节。点击元素修改。' : (page.vectorOps ? '左键修改，右键删除或在两侧插入。' : '点击元素修改。');
+          sequenceMessage.textContent = page.isChar ? '按字节索引；UTF-8 多字节字符会显示为多个字节。右击可插入或删除（仅支持 string 和 vector）。' : ((page.vectorOps || page.stringOps) ? '左键修改，右键删除或在两侧插入。' : '点击元素修改。');
           document.getElementById('sequenceRange').textContent = page.length ? (page.offset + 1) + '–' + (page.offset + page.items.length) + ' / ' + page.length : '空容器';
           prev.disabled = page.offset === 0; next.disabled = page.offset + page.items.length >= page.length;
-          sequenceCells.innerHTML = page.items.map(item => '<button class="array-cell" data-index="' + item.index + '" data-value="' + escapeHtml(item.editValue) + '"' + (page.vectorOps ? ' data-vector-index="' + item.index + '" data-vector-name="' + escapeHtml(page.name) + '" data-vector-char="' + (page.isChar ? '1' : '0') + '" title="右击：删除或插入"' : '') + (!page.editable && !page.vectorOps ? ' disabled' : '') + '><span class="array-idx">[' + item.index + ']</span><span class="array-v">' + escapeHtml(item.value) + '</span></button>').join('');
+          sequenceCells.innerHTML = page.items.map(item => '<button class="array-cell" data-index="' + item.index + '" data-value="' + escapeHtml(item.editValue) + '"' + ((page.vectorOps || page.stringOps) ? ' data-vector-index="' + item.index + '" data-vector-name="' + escapeHtml(page.name) + '" data-vector-char="' + (page.isChar ? '1' : '0') + '" title="右击：删除或插入"' : '') + (!page.editable && !(page.vectorOps || page.stringOps) ? ' disabled' : '') + '><span class="array-idx">[' + item.index + ']</span><span class="array-v">' + escapeHtml(item.value) + '</span></button>').join('');
           sequenceCells.querySelectorAll('[data-index]').forEach(btn => btn.addEventListener('click', () => { if (page.editable) editSequence(page.name, Number(btn.dataset.index), btn.dataset.value, page.isChar); }));
         } else if (msg.type === 'sequenceEdited' && sequenceState && msg.requestId === sequenceRequest) {
           const offset = msg.name === sequenceState.name && Number.isSafeInteger(msg.length) ? Math.min(sequenceState.offset, Math.max(0, msg.length - 1)) : sequenceState.offset;
