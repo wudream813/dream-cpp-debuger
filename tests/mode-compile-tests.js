@@ -172,8 +172,10 @@ async function testModeCompile() {
     assert.strictEqual(pending.length, startIndex + 1, launch + ' invokes compiler');
     assert.strictEqual(snapshots.at(-1).isCompiling, true, launch + ' shows progress');
     await c.stopExecution();
-    pending[startIndex].resolve({ success: true, executable: '/tmp/test', durationMs: 1 });
+    let cleaned = 0;
+    pending[startIndex].resolve({ success: true, executable: '/tmp/test', durationMs: 1, cleanupBuild: () => { cleaned++; } });
     await launching;
+    assert.strictEqual(cleaned, 1, launch + ' releases cancelled compilation');
     assert.strictEqual(started, false, launch + ' must not start after cancellation');
     assert.strictEqual(snapshots.at(-1).isCompiling, false);
     assert.strictEqual(readOnly.enabled, false, launch + ' must release read-only on cancellation');

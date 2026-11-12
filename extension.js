@@ -512,53 +512,62 @@ class DreamDebugController {
       this.outputChannel.appendLine(`[Dream Compiler] 正在编译: ${sourceFile}`);
 
       const compileResult = await this.compileWithProgress(sourceFile, {
+        autoCleanup: true,
         vectorHelpers: true,
         compilerPath: this.config.get('compilerPath', 'g++'),
         compileFlags: this.config.get('compileFlags', ['-g', '-O0', '-std=c++17'])
       }, runId);
 
-      if (runId !== this.runId) return;
-      this.applyCompilerDiagnostics(sourceFile, compileResult);
-
-      if (!compileResult.success) {
-        this.updateStatusBar('idle');
-        vscode.window.showErrorMessage(`编译失败 (CE)，请查看左侧边栏或“问题 (Problems)”面板中的错误详情。`);
-        return;
-      }
-
-      this.outputChannel.appendLine(
-        `[Dream Compiler] 编译成功 (${compileResult.durationMs} ms) -> ${compileResult.executable}`
-      );
-
-      // Automatically open the spacious Debug Dashboard in the right half of the current editor window
-      this.openDashboardPanel(true);
-
-      this.session.gdbPath = this.config.get('gdbPath', 'gdb');
-      this.session.maxArrayPreview = this.config.get('maxArrayPreview', 16);
-
-      let outputCapture = null;
+      let releaseBuild = compileResult && compileResult.cleanupBuild;
       try {
-        if (selectedOutputFile) {
-          if (process.platform !== 'linux') throw new Error('调试输出到文件目前仅支持 Linux');
-          outputCapture = await openOutputFile(selectedOutputFile, [sourceFile, resolvedStdinFile, compileResult.executable], { shouldProceed: () => runId === this.runId });
-          if (runId !== this.runId) { await outputCapture.close(); return; }
+        if (runId !== this.runId) return;
+        this.applyCompilerDiagnostics(sourceFile, compileResult);
+
+        if (!compileResult.success) {
+          this.updateStatusBar('idle');
+          vscode.window.showErrorMessage(`编译失败 (CE)，请查看左侧边栏或“问题 (Problems)”面板中的错误详情。`);
+          return;
         }
-        await this.session.start({
-          outputCapture,
-          executable: compileResult.executable,
-          sourceFile,
-          cwd: path.dirname(sourceFile),
-          stdinMode: this.stdinMode,
-          stdin: this.stdinMode === 'text' ? this.stdinText : '',
-          stdinFile: resolvedStdinFile,
-          stopAtMain: this.config.get('stopAtMain', true)
-        });
-      } catch (err) {
-        if (runId === this.runId) {
-          await this.session.stop();
-          vscode.window.showErrorMessage(`启动调试失败: ${err.message}`);
+
+        this.outputChannel.appendLine(
+          `[Dream Compiler] 编译成功 (${compileResult.durationMs} ms) -> ${compileResult.executable}`
+        );
+
+        // Automatically open the spacious Debug Dashboard in the right half of the current editor window
+        this.openDashboardPanel(true);
+
+        this.session.gdbPath = this.config.get('gdbPath', 'gdb');
+        this.session.maxArrayPreview = this.config.get('maxArrayPreview', 16);
+
+        let outputCapture = null;
+        try {
+          if (selectedOutputFile) {
+            if (process.platform !== 'linux') throw new Error('调试输出到文件目前仅支持 Linux');
+            outputCapture = await openOutputFile(selectedOutputFile, [sourceFile, resolvedStdinFile, compileResult.executable], { shouldProceed: () => runId === this.runId });
+            if (runId !== this.runId) { await outputCapture.close(); return; }
+          }
+          const cleanupBuild = releaseBuild;
+          releaseBuild = null; // The session owns it from this point, even if start fails.
+          await this.session.start({
+            cleanupBuild,
+            outputCapture,
+            executable: compileResult.executable,
+            sourceFile,
+            cwd: path.dirname(sourceFile),
+            stdinMode: this.stdinMode,
+            stdin: this.stdinMode === 'text' ? this.stdinText : '',
+            stdinFile: resolvedStdinFile,
+            stopAtMain: this.config.get('stopAtMain', true)
+          });
+        } catch (err) {
+          if (runId === this.runId) {
+            await this.session.stop();
+            vscode.window.showErrorMessage(`启动调试失败: ${err.message}`);
+          }
+          if (outputCapture) await outputCapture.close().catch(() => {});
         }
-        if (outputCapture) await outputCapture.close().catch(() => {});
+      } finally {
+        if (releaseBuild) releaseBuild();
       }
     } finally {
       if (this.preparingDebugRunId === runId) this.preparingDebugRunId = null;
@@ -619,92 +628,103 @@ class DreamDebugController {
     this.pushSnapshotToWebview();
 
     const compileResult = await this.compileWithProgress(sourceFile, {
+      autoCleanup: true,
       compilerPath: this.config.get('compilerPath', 'g++'),
       compileFlags: this.config.get('compileFlags', ['-g', '-O0', '-std=c++17'])
     }, runId);
 
-    if (runId !== this.runId) return;
-    this.applyCompilerDiagnostics(sourceFile, compileResult);
-    if (!compileResult.success) {
-      this.quickRunId = null;
-      vscode.window.showErrorMessage('C/C++ 编译失败 (CE)，请查看错误提示。');
-      return;
-    }
-
-    this.session.programOutput = '';
-    this.pushSnapshotToWebview();
-
-    let outputCapture = null, previewTimer = null, runRes, runningPromise = null;
-    const pollOutputFile = (final = false) => {
-      if (!outputCapture) return;
-      const text = outputCapture.poll(final);
-      if (text && runId === this.runId) {
-        this.session.programOutput = appendBounded(this.session.programOutput, text);
-        this.pushSnapshotToWebview();
-      }
-    };
+    let releaseBuild = compileResult && compileResult.cleanupBuild;
     try {
-      if (selectedOutputFile) {
-        outputCapture = await openOutputFile(selectedOutputFile, [sourceFile, resolvedStdinFile, compileResult.executable], { shouldProceed: () => runId === this.runId });
-        if (runId !== this.runId) { await outputCapture.close(); return; }
-        previewTimer = setInterval(() => {
-          try { pollOutputFile(); } catch (err) {
-            clearInterval(previewTimer); previewTimer = null;
-            this.outputChannel.appendLine(`[Dream C++] 读取输出文件预览失败: ${err.message}`);
-          }
-        }, 120);
-      }
-      runningPromise = runExecutable(compileResult.executable, {
-      outputCapture,
-      cwd: path.dirname(sourceFile),
-      stdin: this.stdinMode === 'text' ? this.stdinText : '',
-      stdinFile: this.stdinMode === 'file' ? resolvedStdinFile : '',
-      streamMode: this.stdinMode === 'stream',
-      timeoutMs: this.stdinMode === 'stream' ? 60000 : 10000,
-      onProcess: (proc, cancel) => {
-        if (runId !== this.runId) { cancel(); return; }
-        this.activeRunProcess = proc;
-        this.activeRunCancel = cancel;
-        this.activeRunStream = this.stdinMode === 'stream';
-        this.pushSnapshotToWebview();
-      },
-      onOutput: (chunk, _outputSoFar, category) => {
-        if (runId !== this.runId) return;
-        if (category === 'stderr' && !this.quickRunSawStderr) {
-          this.session.programOutput = appendBounded(this.session.programOutput, '\n[stderr]\n');
-          this.quickRunSawStderr = true;
-        }
-        this.session.programOutput = appendBounded(this.session.programOutput, chunk);
-        this.pushSnapshotToWebview();
-      }
-    });
-      if (outputCapture) this.activeFileRunPromise = runningPromise;
-      runRes = await runningPromise;
-
-    } catch (err) {
-      if (runId === this.runId) {
+      if (runId !== this.runId) return;
+      this.applyCompilerDiagnostics(sourceFile, compileResult);
+      if (!compileResult.success) {
         this.quickRunId = null;
-        vscode.window.showErrorMessage(`运行失败：${err.message}`);
+        vscode.window.showErrorMessage('C/C++ 编译失败 (CE)，请查看错误提示。');
+        return;
       }
-      return;
-    } finally {
-      if (this.activeFileRunPromise === runningPromise) this.activeFileRunPromise = null;
-      if (previewTimer) clearInterval(previewTimer);
-      if (outputCapture) {
-        try { pollOutputFile(true); } catch (err) { this.outputChannel.appendLine(`[Dream C++] 读取输出文件预览失败: ${err.message}`); }
-        await outputCapture.close().catch(() => {});
-      }
-    }
 
-    if (runId !== this.runId) return;
-    this.activeRunProcess = null;
-    this.activeRunCancel = null;
-    this.quickRunId = null;
-    const resultLabel = runRes.cancelled ? '已停止' : runRes.killedByTimeout ? '运行超时' : '运行完毕';
-    this.session.programOutput = appendBounded(this.session.programOutput,
-      `\n──────────────────────────────\n` +
-      `[${resultLabel}] 退出码: ${runRes.exitCode} · 耗时: ${runRes.durationMs} ms`);
-    this.pushSnapshotToWebview();
+      this.session.programOutput = '';
+      this.pushSnapshotToWebview();
+
+      let outputCapture = null, previewTimer = null, runRes, runningPromise = null;
+      const pollOutputFile = (final = false) => {
+        if (!outputCapture) return;
+        const text = outputCapture.poll(final);
+        if (text && runId === this.runId) {
+          this.session.programOutput = appendBounded(this.session.programOutput, text);
+          this.pushSnapshotToWebview();
+        }
+      };
+      try {
+        if (selectedOutputFile) {
+          outputCapture = await openOutputFile(selectedOutputFile, [sourceFile, resolvedStdinFile, compileResult.executable], { shouldProceed: () => runId === this.runId });
+          if (runId !== this.runId) { await outputCapture.close(); return; }
+          previewTimer = setInterval(() => {
+            try { pollOutputFile(); } catch (err) {
+              clearInterval(previewTimer); previewTimer = null;
+              this.outputChannel.appendLine(`[Dream C++] 读取输出文件预览失败: ${err.message}`);
+            }
+          }, 120);
+        }
+        runningPromise = runExecutable(compileResult.executable, {
+        outputCapture,
+        cwd: path.dirname(sourceFile),
+        stdin: this.stdinMode === 'text' ? this.stdinText : '',
+        stdinFile: this.stdinMode === 'file' ? resolvedStdinFile : '',
+        streamMode: this.stdinMode === 'stream',
+        timeoutMs: this.stdinMode === 'stream' ? 60000 : 10000,
+        onProcess: (proc, cancel) => {
+          if (releaseBuild && typeof proc.once === 'function') {
+            const release = releaseBuild;
+            releaseBuild = null;
+            proc.once('close', () => release());
+          }
+          if (runId !== this.runId) { cancel(); return; }
+          this.activeRunProcess = proc;
+          this.activeRunCancel = cancel;
+          this.activeRunStream = this.stdinMode === 'stream';
+          this.pushSnapshotToWebview();
+        },
+        onOutput: (chunk, _outputSoFar, category) => {
+          if (runId !== this.runId) return;
+          if (category === 'stderr' && !this.quickRunSawStderr) {
+            this.session.programOutput = appendBounded(this.session.programOutput, '\n[stderr]\n');
+            this.quickRunSawStderr = true;
+          }
+          this.session.programOutput = appendBounded(this.session.programOutput, chunk);
+          this.pushSnapshotToWebview();
+        }
+      });
+        if (outputCapture) this.activeFileRunPromise = runningPromise;
+        runRes = await runningPromise;
+
+      } catch (err) {
+        if (runId === this.runId) {
+          this.quickRunId = null;
+          vscode.window.showErrorMessage(`运行失败：${err.message}`);
+        }
+        return;
+      } finally {
+        if (this.activeFileRunPromise === runningPromise) this.activeFileRunPromise = null;
+        if (previewTimer) clearInterval(previewTimer);
+        if (outputCapture) {
+          try { pollOutputFile(true); } catch (err) { this.outputChannel.appendLine(`[Dream C++] 读取输出文件预览失败: ${err.message}`); }
+          await outputCapture.close().catch(() => {});
+        }
+      }
+
+      if (runId !== this.runId) return;
+      this.activeRunProcess = null;
+      this.activeRunCancel = null;
+      this.quickRunId = null;
+      const resultLabel = runRes.cancelled ? '已停止' : runRes.killedByTimeout ? '运行超时' : '运行完毕';
+      this.session.programOutput = appendBounded(this.session.programOutput,
+        `\n──────────────────────────────\n` +
+        `[${resultLabel}] 退出码: ${runRes.exitCode} · 耗时: ${runRes.durationMs} ms`);
+      this.pushSnapshotToWebview();
+    } finally {
+      if (releaseBuild) releaseBuild();
+    }
   }
 
   cancelActiveRun() {

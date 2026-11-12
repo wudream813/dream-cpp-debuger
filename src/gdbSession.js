@@ -5,6 +5,8 @@
  */
 'use strict';
 
+const { releaseWhenSafe } = require('./buildCleanup');
+
 const { EventEmitter } = require('events');
 const { spawn, execFileSync } = require('child_process');
 const fs = require('fs');
@@ -127,9 +129,21 @@ class GDBSession extends EventEmitter {
    * Safely awaits complete termination of any previous GDB process first.
    */
   async start(config = {}) {
+    let handedToProcess = false;
+    const release = typeof config.cleanupBuild === 'function' ? config.cleanupBuild : null;
+    try {
+      return await this._startSession(config, () => { handedToProcess = true; });
+    } finally {
+      if (release && !handedToProcess) { try { release(); } catch (_) {} }
+    }
+  }
+
+  async _startSession(config = {}, transferBuild = () => {}) {
     await this.stop();
 
     const currentSessionId = ++this.sessionId;
+    const inferiorTracker = { launchAttempted: false, pid: null, exited: false };
+    this._inferiorTracker = inferiorTracker;
     this.executable = config.executable;
     this.sourceFile = config.sourceFile || null;
     const rawCwd = config.cwd || (this.executable ? path.dirname(this.executable) : process.cwd());
@@ -215,6 +229,11 @@ class GDBSession extends EventEmitter {
         ...(this.outputCapture ? { stdio: ['pipe', 'pipe', 'pipe', this.outputCapture.fd] } : {})
       });
       this.proc = proc;
+      if (typeof config.cleanupBuild === 'function') {
+        const release = config.cleanupBuild;
+        proc.once('close', () => releaseWhenSafe(release, inferiorTracker));
+        transferBuild();
+      }
     } catch (err) {
       this.state = 'error';
       this.emit('status', { state: 'error', reason: err.message });
@@ -319,6 +338,7 @@ class GDBSession extends EventEmitter {
     this.state = 'running';
     this.emit('status', { state: 'running', reason: 'launch' });
     this._emitSnapshot();
+    inferiorTracker.launchAttempted = true;
     await this.sendCommand('-exec-run');
   }
 
@@ -1720,6 +1740,7 @@ class GDBSession extends EventEmitter {
     if (record.type === 'notify') {
       if (record.class === 'thread-group-started' && record.results?.pid) {
         this.inferiorPid = Number(record.results.pid);
+        if (this._inferiorTracker && Number.isSafeInteger(this.inferiorPid) && this.inferiorPid > 0) this._inferiorTracker.pid = this.inferiorPid;
       } else if (record.class === 'breakpoint-modified' && record.results?.bkpt) {
         const bkpt = record.results.bkpt;
         for (const bp of this.breakpoints.values()) {
@@ -1752,6 +1773,7 @@ class GDBSession extends EventEmitter {
       reason === 'exited-signalled'
     ) {
       const exitCode = results['exit-code'] ? parseInt(results['exit-code'], 8) : 0;
+      if (this._inferiorTracker) this._inferiorTracker.exited = true;
       this.state = 'exited';
       this.stopLocation = null;
       this.emit('output', {

@@ -11,6 +11,7 @@ const fs = require('fs');
 const os = require('os');
 const { appendBounded } = require('./outputLimits');
 const { openRegularFile } = require('./safeFiles');
+const { createBuildLease } = require('./buildCleanup');
 
 const SOURCE_EXTS = new Set(['.cpp', '.cc', '.cxx', '.c++', '.c']);
 const DIAG_REGEX = /^(.+?):(\d+):(?:(\d+):)?\s*(fatal error|error|warning|note|致命错误|错误|警告|附注):\s*(.+)$/i;
@@ -92,6 +93,18 @@ function compileSourceFile(sourceFile, options = {}) {
 
     const extSuffix = process.platform === 'win32' ? '.exe' : '.debug.out';
     const outputBinary = path.join(outDir, `program${extSuffix}`);
+    const lease = options.autoCleanup ? createBuildLease(outDir, outputBinary) : null;
+    let completed = false;
+    function complete(result) {
+      if (completed) return;
+      completed = true;
+      if (lease) {
+        lease.capture();
+        if (result.success) result.cleanupBuild = lease.cleanup;
+        else lease.cleanup();
+      }
+      resolve(result);
+    }
 
     // Add typed mutation helpers only for C++ debug builds explicitly requesting them.
     const helper = options.vectorHelpers && ext !== '.c' ? [path.join(__dirname, 'vectorHelpers.cpp')] : [];
@@ -108,7 +121,7 @@ function compileSourceFile(sourceFile, options = {}) {
         env: process.env
       });
     } catch (err) {
-      return resolve({
+      return complete({
         success: false,
         executable: null,
         commandLine,
@@ -144,7 +157,7 @@ function compileSourceFile(sourceFile, options = {}) {
         severity: 'error',
         message: `未找到编译器 "${compiler}" (${err.message})，请检查系统 PATH 或设置 dreamCppDebug.compilerPath`
       };
-      resolve({
+      complete({
         success: false,
         executable: null,
         commandLine,
@@ -162,7 +175,7 @@ function compileSourceFile(sourceFile, options = {}) {
       const errors = diagnostics.filter((d) => d.severity === 'error');
       const warnings = diagnostics.filter((d) => d.severity === 'warning');
       const success = code === 0 && fs.existsSync(outputBinary);
-      resolve({
+      complete({
         success,
         exitCode: code,
         executable: success ? outputBinary : null,

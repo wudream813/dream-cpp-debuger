@@ -18,6 +18,9 @@ exports.run = async () => {
   let editor = await vscode.window.showTextDocument(doc, { preview: false });
   await vscode.extensions.getExtension('wudream.dream-cpp-debuger').activate();
   await vscode.commands.executeCommand('dream-cpp-debug.startDebug');
+  const buildRoot = path.join(dir, '.dream-debug');
+  const liveBuilds = fs.readdirSync(buildRoot).filter(name => name.startsWith('build-'));
+  assert.strictEqual(liveBuilds.length, 1, 'active build must exist while GDB is running');
   await vscode.window.showTextDocument(doc, { preview: false });
   await wait(200);
   let before = doc.getText();
@@ -30,6 +33,8 @@ exports.run = async () => {
   await vscode.commands.executeCommand('type', { text: 'Z' });
   assert.strictEqual(headerDoc.getText(), before, 'switching source editors must apply protection');
   await vscode.commands.executeCommand('dream-cpp-debug.stop');
+  await wait(200);
+  assert.deepStrictEqual(fs.readdirSync(buildRoot), [], 'build removed after stopping GDB');
   await vscode.window.showTextDocument(doc, { preview: false });
   await vscode.commands.executeCommand('type', { text: 'Z' });
   assert.notStrictEqual(doc.getText(), 'int main() {\n  volatile int value = 1;\n  return value - 1;\n}\n', 'source must be editable after stop');
@@ -46,6 +51,7 @@ exports.run = async () => {
   before = doc.getText();
   await vscode.commands.executeCommand('type', { text: 'Z' });
   assert.notStrictEqual(doc.getText(), before, 'compile failure must restore editing');
-  console.log('REAL_VSCODE_READONLY_PASS');
+  assert.deepStrictEqual(fs.readdirSync(buildRoot), [], 'failed compile leaves no build directory');
+  console.log('REAL_VSCODE_READONLY_AND_BUILD_CLEANUP_PASS');
   fs.rmSync(dir, { recursive: true, force: true });
 };

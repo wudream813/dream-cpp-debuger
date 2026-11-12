@@ -582,6 +582,9 @@ int main() {
   await require('./editor-readonly-tests').testEditorReadOnly();
   ok('Debug source editor read-only lifecycle, restoration and restart races');
 
+  await require('./build-cleanup-tests').testBuildCleanup();
+  ok('Automatic build cleanup, real GDB/DAP lifecycles and safe ownership checks');
+
   console.log(`\n🎉 All ${passed} tests passed!`);
 }
 

@@ -237,38 +237,48 @@ class DreamGdbDebugAdapter {
   async _launchSession(cfg) {
     let targetProgram = cfg.program;
     let sourceFile = null;
+    let releaseBuild = null;
 
     await this.session.stop();
 
-    if (isSourceFile(targetProgram)) {
-      sourceFile = targetProgram;
-      const compileRes = await compileSourceFile(sourceFile, {
-        compilerPath: cfg.compilerPath || 'g++',
-        compileFlags: cfg.compileFlags
-      });
-      this.onCompileReport(compileRes);
-      if (!compileRes.success) {
-        this._sendEvent('output', {
-          category: 'stderr',
-          output: `[编译失败]\n${compileRes.stderr}\n`
+    try {
+      if (isSourceFile(targetProgram)) {
+        sourceFile = targetProgram;
+        const compileRes = await compileSourceFile(sourceFile, {
+          autoCleanup: true,
+          compilerPath: cfg.compilerPath || 'g++',
+          compileFlags: cfg.compileFlags
         });
-        this._sendEvent('terminated', {});
-        return;
+        releaseBuild = compileRes.cleanupBuild || null;
+        this.onCompileReport(compileRes);
+        if (!compileRes.success) {
+          this._sendEvent('output', {
+            category: 'stderr',
+            output: `[编译失败]\n${compileRes.stderr}\n`
+          });
+          this._sendEvent('terminated', {});
+          return;
+        }
+        targetProgram = compileRes.executable;
       }
-      targetProgram = compileRes.executable;
-    }
 
-    if (cfg.gdbPath) {
-      this.session.gdbPath = cfg.gdbPath;
+      if (cfg.gdbPath) {
+        this.session.gdbPath = cfg.gdbPath;
+      }
+      const cleanupBuild = releaseBuild;
+      releaseBuild = null;
+      await this.session.start({
+        cleanupBuild,
+        executable: targetProgram,
+        sourceFile,
+        cwd: cfg.cwd,
+        args: cfg.args,
+        stdin: cfg.stdin || '',
+        stopAtMain: cfg.stopAtMain !== false
+      });
+    } finally {
+      if (releaseBuild) releaseBuild();
     }
-    await this.session.start({
-      executable: targetProgram,
-      sourceFile,
-      cwd: cfg.cwd,
-      args: cfg.args,
-      stdin: cfg.stdin || '',
-      stopAtMain: cfg.stopAtMain !== false
-    });
   }
 
   _sendResponse(requestSeq, command, success, body = {}, message = undefined) {
