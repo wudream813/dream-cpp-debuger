@@ -74,12 +74,12 @@ async function testModeCompile() {
   const pending = [];
   let selected, pickerCalls = 0;
   let saved, workspaceMode, lastTarget, updateFailure, storageFailure;
-  const state = {}, warnings = [];
+  const state = {}, warnings = [], launchErrors = [];
   const config = { get: (_k, def) => workspaceMode || saved || def, inspect: () => ({ globalValue: saved, workspaceValue: workspaceMode }),
     update: async (_k, v, target) => { lastTarget = target; if (updateFailure) throw Error('bad settings JSON'); if (target === 2) workspaceMode = v; else saved = v; } };
   const vscode = { ConfigurationTarget: { Global: 1, Workspace: 2 }, workspace: { textDocuments: [], getConfiguration: () => config }, window: {
     showQuickPick: async items => { pickerCalls++; return items.find(i => i.mode === selected); },
-    showWarningMessage(m) { warnings.push(m); }, showErrorMessage() {}
+    showWarningMessage(m) { warnings.push(m); }, showErrorMessage(m) { launchErrors.push(m); }
   } };
   const fakeCompiler = { compileSourceFile: () => new Promise((resolve, reject) => pending.push({ resolve, reject })) };
   const m = { exports: {} };
@@ -191,7 +191,8 @@ async function testModeCompile() {
   failure = c.startDebugSession();
   await new Promise(resolve => setImmediate(resolve));
   pending[buildIndex].reject(new Error('compiler error'));
-  await assert.rejects(failure, /compiler error/);
+  await failure;
+  assert.match(launchErrors.at(-1), /compiler error/, 'compiler exception is shown to the user');
   assert.strictEqual(readOnly.enabled, false, 'compiler exception unlocks editor');
 }
 module.exports = { testModeCompile };

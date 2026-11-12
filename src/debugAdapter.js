@@ -10,12 +10,14 @@ const path = require('path');
 const { isSourceFile, compileSourceFile } = require('./compiler');
 
 class DreamGdbDebugAdapter {
-  constructor(session, onCompileReport) {
+  constructor(session, onCompileReport, compileDebug = compileSourceFile) {
     this.session = session;
     this.onCompileReport = onCompileReport || (() => {});
+    this.compileDebug = compileDebug;
     this._sendMessageEmitter = new EventEmitter();
     this.seq = 1;
     this.launchConfig = null;
+    this.launchGeneration = 0;
 
     this.onDidSendMessage = (listener) => {
       this._sendMessageEmitter.on('message', listener);
@@ -67,6 +69,7 @@ class DreamGdbDebugAdapter {
         }
 
         case 'launch': {
+          ++this.launchGeneration;
           this.launchConfig = args;
           this._sendResponse(seq, command, true, {});
           break;
@@ -219,6 +222,7 @@ class DreamGdbDebugAdapter {
 
         case 'disconnect':
         case 'terminate': {
+          ++this.launchGeneration;
           await this.session.stop();
           this._sendResponse(seq, command, true, {});
           break;
@@ -238,18 +242,21 @@ class DreamGdbDebugAdapter {
     let targetProgram = cfg.program;
     let sourceFile = null;
     let releaseBuild = null;
+    const generation = this.launchGeneration;
 
     await this.session.stop();
+    if (generation !== this.launchGeneration) return;
 
     try {
       if (isSourceFile(targetProgram)) {
         sourceFile = targetProgram;
-        const compileRes = await compileSourceFile(sourceFile, {
+        const compileRes = await this.compileDebug(sourceFile, {
           autoCleanup: true,
           compilerPath: cfg.compilerPath || 'g++',
           compileFlags: cfg.compileFlags
-        });
+        }, cfg);
         releaseBuild = compileRes.cleanupBuild || null;
+        if (generation !== this.launchGeneration) return;
         this.onCompileReport(compileRes);
         if (!compileRes.success) {
           this._sendEvent('output', {
@@ -303,6 +310,7 @@ class DreamGdbDebugAdapter {
   }
 
   dispose() {
+    ++this.launchGeneration;
     this.session.removeListener('status', this._onStatus);
     this.session.removeListener('output', this._onOutput);
   }

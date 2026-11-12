@@ -2,7 +2,7 @@
   "name": "dream-cpp-debuger",
   "displayName": "Dream C++ Debugger (GDB)",
   "description": "现代简洁的 C/C++ GDB 调试器扩展 —— 零配置一键编译调试、现代化侧边栏面板、STL/数组可视化、条件断点、标准输入(stdin)注入与行内变量实时预览。",
-  "version": "1.1.19",
+  "version": "1.2.0",
   "publisher": "wudream",
   "author": {
     "name": "wudream813"
@@ -398,6 +398,11 @@
           "type": "number",
           "default": 16,
           "description": "侧边栏数组/STL 可视化卡片默认展示的最大元素数量"
+        },
+        "dreamCppDebug.useCompilerIntegration": {
+          "type": "boolean",
+          "default": true,
+          "description": "安装兼容的 Dream C++ Compiler 后使用其调试构建接口；关闭后始终使用内置编译。"
         }
       }
     }

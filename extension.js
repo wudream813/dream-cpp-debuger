@@ -19,6 +19,7 @@ const { getSidebarHtml } = require('./src/sidebarHtml');
 const { getDashboardHtml } = require('./src/dashboardHtml');
 const { DreamGdbDebugAdapter } = require('./src/debugAdapter');
 const { EditorReadOnly } = require('./src/editorReadOnly');
+const { compileDebugWithCompanion } = require('./src/compilerIntegration');
 
 function initialUserMode(config, globalState) {
   const inspected = config.inspect('interfaceMode');
@@ -242,7 +243,9 @@ class DreamDebugController {
     const previous = this.compileQueue || Promise.resolve();
     const task = previous.catch(() => {}).then(() => {
       if (runId !== this.runId) return null;
-      return compileSourceFile(sourceFile, options);
+      return options.companionDebug
+        ? compileDebugWithCompanion(vscode, sourceFile, options, compileSourceFile, msg => this.outputChannel.appendLine(`[Dream Compiler] ${msg}`))
+        : compileSourceFile(sourceFile, options);
     });
     this.compileQueue = task.catch(() => {});
     try { return await task; }
@@ -511,12 +514,19 @@ class DreamDebugController {
       this.statusBarItem.text = '$(sync~spin) 正在编译 C++ 源码...';
       this.outputChannel.appendLine(`[Dream Compiler] 正在编译: ${sourceFile}`);
 
-      const compileResult = await this.compileWithProgress(sourceFile, {
-        autoCleanup: true,
-        vectorHelpers: true,
-        compilerPath: this.config.get('compilerPath', 'g++'),
-        compileFlags: this.config.get('compileFlags', ['-g', '-O0', '-std=c++17'])
-      }, runId);
+      let compileResult;
+      try {
+        compileResult = await this.compileWithProgress(sourceFile, {
+          autoCleanup: true,
+          companionDebug: true,
+          vectorHelpers: true,
+          compilerPath: this.config.get('compilerPath', 'g++'),
+          compileFlags: this.config.get('compileFlags', ['-g', '-O0', '-std=c++17'])
+        }, runId);
+      } catch (err) {
+        if (runId === this.runId) vscode.window.showErrorMessage(`调试编译失败：${err.message}`);
+        return;
+      }
 
       let releaseBuild = compileResult && compileResult.cleanupBuild;
       try {
@@ -1220,6 +1230,9 @@ function activate(context) {
         const adapter = new DreamGdbDebugAdapter(controller.session, (compileRes) => {
           const active = controller.resolveActiveSourceFile();
           if (active) controller.applyCompilerDiagnostics(active, compileRes);
+        }, (source, options, cfg) => {
+          if (cfg.compilerPath || cfg.compileFlags) return compileSourceFile(source, options);
+          return compileDebugWithCompanion(vscode, source, options, compileSourceFile, msg => controller.outputChannel.appendLine(`[Dream Compiler] ${msg}`));
         });
         return new vscode.DebugAdapterInlineImplementation(adapter);
       }

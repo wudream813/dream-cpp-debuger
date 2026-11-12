@@ -585,6 +585,9 @@ int main() {
   await require('./build-cleanup-tests').testBuildCleanup();
   ok('Automatic build cleanup, real GDB/DAP lifecycles and safe ownership checks');
 
+  await require('./compiler-integration-tests').testCompilerIntegration();
+  ok('Optional compiler integration, compatibility and fallback');
+
   console.log(`\n🎉 All ${passed} tests passed!`);
 }
 
