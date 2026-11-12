@@ -47,8 +47,9 @@ async function testResets() {
   const realRequire = createRequire(filename);
   let oldRunOptions, resolveOldRun;
   const fakeVscode = {
+    ProgressLocation: { Notification: 15 },
     workspace: { textDocuments: [], getConfiguration: () => ({ get: (_k, def) => def }) },
-    window: { showWarningMessage() {}, showErrorMessage(m) { throw Error(m); } }
+    window: { withProgress: async (_opts, task) => task({}, { onCancellationRequested: () => ({ dispose() {} }) }), showWarningMessage() {}, showErrorMessage(m) { throw Error(m); } }
   };
   let runImpl = (_exe, options) => {
     oldRunOptions = options;

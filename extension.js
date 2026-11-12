@@ -20,6 +20,7 @@ const { getDashboardHtml } = require('./src/dashboardHtml');
 const { DreamGdbDebugAdapter } = require('./src/debugAdapter');
 const { EditorReadOnly } = require('./src/editorReadOnly');
 const { compileDebugWithCompanion } = require('./src/compilerIntegration');
+const { withCompileNotification } = require('./src/compileProgress');
 
 function initialUserMode(config, globalState) {
   const inspected = config.inspect('interfaceMode');
@@ -239,17 +240,30 @@ class DreamDebugController {
     this.compilingRunId = runId;
     this.statusBarItem.text = '$(sync~spin) 正在编译 C/C++ 源码...';
     this.pushSnapshotToWebview();
-    // Serialise builds: an obsolete compiler must not overwrite a newer executable.
+    const abort = new AbortController();
+    this.activeCompileAbort = abort;
     const previous = this.compileQueue || Promise.resolve();
-    const task = previous.catch(() => {}).then(() => {
-      if (runId !== this.runId) return null;
-      return options.companionDebug
-        ? compileDebugWithCompanion(vscode, sourceFile, options, compileSourceFile, msg => this.outputChannel.appendLine(`[Dream Compiler] ${msg}`))
-        : compileSourceFile(sourceFile, options);
+    const task = vscode.window.withProgress({ location: vscode.ProgressLocation.Notification,
+      title: '正在编译...', cancellable: true }, async (_progress, token) => {
+      const subscription = token.onCancellationRequested(() => abort.abort());
+      try {
+        await previous.catch(() => {});
+        if (runId !== this.runId || abort.signal.aborted) return null;
+        const buildOptions = { ...options, signal: abort.signal };
+        const result = options.companionDebug
+          ? await compileDebugWithCompanion(vscode, sourceFile, buildOptions, compileSourceFile, msg => this.outputChannel.appendLine(`[Dream Compiler] ${msg}`))
+          : await compileSourceFile(sourceFile, buildOptions);
+        if (abort.signal.aborted) {
+          if (typeof result?.cleanupBuild === 'function') result.cleanupBuild();
+          return { success: false, cancelled: true, diagnostics: [], errors: [], warnings: [] };
+        }
+        return result;
+      } finally { subscription.dispose(); }
     });
     this.compileQueue = task.catch(() => {});
     try { return await task; }
     finally {
+      if (this.activeCompileAbort === abort) this.activeCompileAbort = null;
       if (this.compilingRunId === runId) {
         this.compilingRunId = null;
         if (runId === this.runId) {
@@ -472,6 +486,7 @@ class DreamDebugController {
     }
 
     const selectedOutputFile = this.outputFile || '';
+    this.activeCompileAbort?.abort();
     const runId = ++this.runId;
     this.quickRunId = null;
     this.resettingRunId = runId;
@@ -531,6 +546,10 @@ class DreamDebugController {
       let releaseBuild = compileResult && compileResult.cleanupBuild;
       try {
         if (runId !== this.runId) return;
+        if (!compileResult || compileResult.cancelled) {
+          this.outputChannel.appendLine('[Dream Compiler] 编译已取消。');
+          return;
+        }
         this.applyCompilerDiagnostics(sourceFile, compileResult);
 
         if (!compileResult.success) {
@@ -540,7 +559,9 @@ class DreamDebugController {
         }
 
         this.outputChannel.appendLine(
-          `[Dream Compiler] 编译成功 (${compileResult.durationMs} ms) -> ${compileResult.executable}`
+          compileResult.integration?.cacheHit
+            ? `[Dream Compiler] 智能编译：源码和依赖未变化，复用调试构建 -> ${compileResult.executable}`
+            : `[Dream Compiler] 编译成功 (${compileResult.durationMs} ms) -> ${compileResult.executable}`
         );
 
         // Automatically open the spacious Debug Dashboard in the right half of the current editor window
@@ -646,6 +667,11 @@ class DreamDebugController {
     let releaseBuild = compileResult && compileResult.cleanupBuild;
     try {
       if (runId !== this.runId) return;
+      if (!compileResult || compileResult.cancelled) {
+        this.quickRunId = null;
+        this.outputChannel.appendLine('[Dream Compiler] 编译已取消。');
+        return;
+      }
       this.applyCompilerDiagnostics(sourceFile, compileResult);
       if (!compileResult.success) {
         this.quickRunId = null;
@@ -748,6 +774,7 @@ class DreamDebugController {
   }
 
   async stopExecution() {
+    this.activeCompileAbort?.abort();
     if (this.quickRunId === this.runId || this.compilingRunId === this.runId || this.preparingDebugRunId === this.runId) {
       ++this.runId; // invalidate pending compile/start and late output callbacks
       this.quickRunId = null;
@@ -1124,6 +1151,7 @@ class DreamDebugController {
   }
 
   dispose() {
+    this.activeCompileAbort?.abort();
     ++this.runId;
     this.quickRunId = null;
     this.cancelActiveRun();
@@ -1230,10 +1258,10 @@ function activate(context) {
         const adapter = new DreamGdbDebugAdapter(controller.session, (compileRes) => {
           const active = controller.resolveActiveSourceFile();
           if (active) controller.applyCompilerDiagnostics(active, compileRes);
-        }, (source, options, cfg) => {
-          if (cfg.compilerPath || cfg.compileFlags) return compileSourceFile(source, options);
-          return compileDebugWithCompanion(vscode, source, options, compileSourceFile, msg => controller.outputChannel.appendLine(`[Dream Compiler] ${msg}`));
-        });
+        }, (source, options, cfg) => withCompileNotification(vscode, source, options, (file, buildOptions) => {
+          if (cfg.compilerPath || cfg.compileFlags) return compileSourceFile(file, buildOptions);
+          return compileDebugWithCompanion(vscode, file, buildOptions, compileSourceFile, msg => controller.outputChannel.appendLine(`[Dream Compiler] ${msg}`));
+        }));
         return new vscode.DebugAdapterInlineImplementation(adapter);
       }
     })

@@ -10,6 +10,7 @@ exports.run = async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dream-pair-'));
   const file = path.join(root, 'pair.cpp');
   const paired = process.env.DREAM_EXPECT_COMPANION === '1';
+  const cached = process.env.DREAM_EXPECT_CACHED === '1';
   const oldCompanion = process.env.DREAM_EXPECT_COMPANION === 'old';
   const header = paired ? '// compileOptions: -std=c++17 -DINTEGRATED=1 -O2 -Wl,--stack=123\n#ifndef INTEGRATED\n#error companion not used\n#endif\n' : '';
   fs.writeFileSync(file, header + 'int main() {\n volatile int x = 1;\n return x - 1;\n}\n');
@@ -33,7 +34,13 @@ exports.run = async () => {
       assert(symbols.includes('dream_debug_string_insert'), 'string mutation helper linked');
     }
     assert(result.cleanupBuild());
-    assert(!fs.existsSync(result.executable));
+    if (cached) {
+      assert(fs.existsSync(result.executable), 'idle build remains for smart compile');
+      const repeated = await api.compileForDebug(file);
+      assert(repeated.success && repeated.integration.cacheHit, 'unchanged source reuses debug build');
+      assert.strictEqual(repeated.executable, result.executable);
+      repeated.cleanupBuild();
+    } else assert(!fs.existsSync(result.executable));
     await vscode.commands.executeCommand('dream-cpp-compiler.startDebug');
   } else {
     if (oldCompanion) { assert(compiler); assert(!(await compiler.activate())?.compileForDebug); }
@@ -44,7 +51,7 @@ exports.run = async () => {
   assert.strictEqual(fs.readdirSync(buildRoot).length, 1, 'debug build created and kept during session');
   await vscode.commands.executeCommand('dream-cpp-debug.stop');
   await wait(300);
-  assert.deepStrictEqual(fs.readdirSync(buildRoot), [], 'debug build cleaned after stop');
+  assert.strictEqual(fs.readdirSync(buildRoot).length, cached ? 1 : 0, 'idle cache retained only when enabled');
   if (paired) {
     // Exercise the companion through the native DAP entry too, not only the sidebar command.
     let reportStop;
@@ -63,7 +70,7 @@ exports.run = async () => {
       assert.strictEqual(fs.readdirSync(buildRoot).length, 1, 'DAP delegated build stays while debugging');
       await vscode.debug.stopDebugging();
       await wait(300);
-      assert.deepStrictEqual(fs.readdirSync(buildRoot), [], 'DAP build cleaned after stop');
+      assert.strictEqual(fs.readdirSync(buildRoot).length, cached ? 1 : 0, 'DAP build released to cache or cleaned');
     } finally { tracker.dispose(); }
   }
   console.log(paired ? 'REAL_VSCODE_COMPANION_PASS' : oldCompanion ? 'REAL_VSCODE_OLD_COMPANION_PASS' : 'REAL_VSCODE_STANDALONE_PASS');

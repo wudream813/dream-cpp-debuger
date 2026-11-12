@@ -72,12 +72,13 @@ async function testModeCompile() {
   const filename = path.join(__dirname, '..', 'extension.js');
   const realRequire = createRequire(filename);
   const pending = [];
-  let selected, pickerCalls = 0;
+  let selected, pickerCalls = 0, cancelProgress, latestProgress;
   let saved, workspaceMode, lastTarget, updateFailure, storageFailure;
   const state = {}, warnings = [], launchErrors = [];
   const config = { get: (_k, def) => workspaceMode || saved || def, inspect: () => ({ globalValue: saved, workspaceValue: workspaceMode }),
     update: async (_k, v, target) => { lastTarget = target; if (updateFailure) throw Error('bad settings JSON'); if (target === 2) workspaceMode = v; else saved = v; } };
-  const vscode = { ConfigurationTarget: { Global: 1, Workspace: 2 }, workspace: { textDocuments: [], getConfiguration: () => config }, window: {
+  const vscode = { ProgressLocation: { Notification: 15 }, ConfigurationTarget: { Global: 1, Workspace: 2 }, workspace: { textDocuments: [], getConfiguration: () => config }, window: {
+    withProgress: async (options, task) => { latestProgress = options; return task({}, { onCancellationRequested: fn => { cancelProgress = fn; return { dispose() {} }; } }); },
     showQuickPick: async items => { pickerCalls++; return items.find(i => i.mode === selected); },
     showWarningMessage(m) { warnings.push(m); }, showErrorMessage(m) { launchErrors.push(m); }
   } };
@@ -194,5 +195,19 @@ async function testModeCompile() {
   await failure;
   assert.match(launchErrors.at(-1), /compiler error/, 'compiler exception is shown to the user');
   assert.strictEqual(readOnly.enabled, false, 'compiler exception unlocks editor');
+  buildIndex = pending.length;
+  const errorCount = launchErrors.length;
+  const cancelledLaunch = c.startDebugSession();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.strictEqual(latestProgress.location, 15);
+  assert.strictEqual(latestProgress.cancellable, true);
+  cancelProgress();
+  let releaseAfterCancel = 0;
+  pending[buildIndex].resolve({ success: true, executable: '/tmp/test', cleanupBuild: () => { releaseAfterCancel++; } });
+  await cancelledLaunch;
+  assert.strictEqual(releaseAfterCancel, 1, 'notification cancellation releases late build');
+  assert.strictEqual(launchErrors.length, errorCount, 'cancellation is not a compile error');
+  assert.strictEqual(readOnly.enabled, false, 'notification cancellation restores editing');
+
 }
 module.exports = { testModeCompile };

@@ -2,6 +2,7 @@
 const assert = require('assert');
 const { compileDebugWithCompanion } = require('../src/compilerIntegration');
 const { DreamGdbDebugAdapter } = require('../src/debugAdapter');
+const { withCompileNotification } = require('../src/compileProgress');
 const { EventEmitter } = require('events');
 async function testCompilerIntegration() {
   let ext, enabled = true, fallbackCalls = 0, calls = 0;
@@ -32,6 +33,20 @@ async function testCompilerIntegration() {
   await adapter.handleMessage({ type: 'request', command: 'disconnect', seq: 1 });
   resolveBuild({ success: true, executable: '/tmp/test', cleanupBuild: () => { releaseCount++; } });
   await launching; assert.strictEqual(starts, 0); assert.strictEqual(releaseCount, 1); adapter.dispose();
+  let onCancel, stopBuild, cancelledSignal, freed = 0, progressOptions;
+  const fakeProgress = { ProgressLocation: { Notification: 15 }, window: { withProgress: (opts, fn) => {
+    progressOptions = opts;
+    return fn({}, { onCancellationRequested: callback => { onCancel = callback; return { dispose() {} }; } });
+  } } };
+  const waiting = withCompileNotification(fakeProgress, '/tmp/a.cpp', {}, (_file, options) => {
+    cancelledSignal = options.signal;
+    return new Promise(resolve => { stopBuild = resolve; });
+  });
+  assert.strictEqual(progressOptions.cancellable, true); assert.strictEqual(progressOptions.location, 15);
+  onCancel(); assert(cancelledSignal.aborted);
+  stopBuild({ success: true, cleanupBuild: () => { freed++; } });
+  const cancelled = await waiting; assert(cancelled.cancelled); assert.strictEqual(freed, 1);
+
 
 }
 module.exports = { testCompilerIntegration };

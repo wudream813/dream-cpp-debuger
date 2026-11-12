@@ -13,10 +13,11 @@ async function compileDebugWithCompanion(vscode, source, options, fallback, log 
       catch (err) { log(`编译插件激活失败，使用内置编译：${err.message}`); }
       if (api && api.apiVersion === 1 && typeof api.compileForDebug === 'function') {
         log('正在使用 Dream C++ Compiler 的调试构建接口。');
-        const result = await api.compileForDebug(path.resolve(source));
+        const result = await api.compileForDebug(path.resolve(source), { signal: options.signal });
         if (!result || typeof result.success !== 'boolean' || (result.success && (typeof result.executable !== 'string' || typeof result.cleanupBuild !== 'function'))) {
           throw new Error('编译插件返回了不兼容的调试构建结果');
         }
+        if (result.integration?.cacheHit) log('智能编译：源码和依赖未变化，复用调试构建。');
         if (result.integration?.ignoredFlags?.length) log(`调试构建未使用的编译选项：${result.integration.ignoredFlags.join(' ')}`);
         return result;
       }

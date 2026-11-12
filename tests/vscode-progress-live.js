@@ -1,0 +1,28 @@
+'use strict';
+const fs = require('fs'), os = require('os'), path = require('path'), assert = require('assert'), vscode = require('vscode');
+const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+exports.run = async () => {
+  if (process.platform === 'win32') return;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dream-progress-'));
+  const file = path.join(dir, 'main.cpp'), compiler = path.join(dir, 'slow-compiler');
+  fs.writeFileSync(file, 'int main() { return 0; }\n');
+  fs.writeFileSync(compiler, '#!/bin/sh\nsleep 25\n'); fs.chmodSync(compiler, 0o700);
+  const cfg = vscode.workspace.getConfiguration('dreamCppDebug');
+  await cfg.update('interfaceMode', 'beginner', vscode.ConfigurationTarget.Global);
+  await cfg.update('compilerPath', compiler, vscode.ConfigurationTarget.Global);
+  const doc = await vscode.workspace.openTextDocument(file);
+  await vscode.window.showTextDocument(doc);
+  await vscode.extensions.getExtension('wudream.dream-cpp-debuger').activate();
+  const run = vscode.commands.executeCommand('dream-cpp-debug.startDebug');
+  await wait(2000); console.log('REAL_PROGRESS_VISIBLE_WAIT');
+  await wait(14000);
+  await vscode.commands.executeCommand('dream-cpp-debug.stop');
+  await run;
+  assert.deepStrictEqual(fs.readdirSync(path.join(dir, '.dream-debug')), [], 'cancelled build must be removed');
+  await vscode.window.showTextDocument(doc);
+  const before = doc.getText(); await vscode.commands.executeCommand('type', { text: 'X' });
+  assert.notStrictEqual(doc.getText(), before, 'cancel restores editability');
+  console.log('REAL_PROGRESS_CANCEL_PASS');
+  await cfg.update('compilerPath', undefined, vscode.ConfigurationTarget.Global);
+  fs.rmSync(dir, { recursive: true, force: true });
+};

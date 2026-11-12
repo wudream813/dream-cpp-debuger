@@ -18,6 +18,7 @@ class DreamGdbDebugAdapter {
     this.seq = 1;
     this.launchConfig = null;
     this.launchGeneration = 0;
+    this.compileAbort = null;
 
     this.onDidSendMessage = (listener) => {
       this._sendMessageEmitter.on('message', listener);
@@ -222,6 +223,7 @@ class DreamGdbDebugAdapter {
 
         case 'disconnect':
         case 'terminate': {
+          this.compileAbort?.abort();
           ++this.launchGeneration;
           await this.session.stop();
           this._sendResponse(seq, command, true, {});
@@ -250,13 +252,20 @@ class DreamGdbDebugAdapter {
     try {
       if (isSourceFile(targetProgram)) {
         sourceFile = targetProgram;
-        const compileRes = await this.compileDebug(sourceFile, {
-          autoCleanup: true,
-          compilerPath: cfg.compilerPath || 'g++',
-          compileFlags: cfg.compileFlags
-        }, cfg);
+        const abort = new AbortController();
+        this.compileAbort = abort;
+        let compileRes;
+        try {
+          compileRes = await this.compileDebug(sourceFile, {
+            autoCleanup: true,
+            compilerPath: cfg.compilerPath || 'g++',
+            compileFlags: cfg.compileFlags,
+            signal: abort.signal
+          }, cfg);
+        } finally { if (this.compileAbort === abort) this.compileAbort = null; }
         releaseBuild = compileRes.cleanupBuild || null;
         if (generation !== this.launchGeneration) return;
+        if (compileRes.cancelled) { this._sendEvent('terminated', {}); return; }
         this.onCompileReport(compileRes);
         if (!compileRes.success) {
           this._sendEvent('output', {
@@ -310,6 +319,7 @@ class DreamGdbDebugAdapter {
   }
 
   dispose() {
+    this.compileAbort?.abort();
     ++this.launchGeneration;
     this.session.removeListener('status', this._onStatus);
     this.session.removeListener('output', this._onOutput);
