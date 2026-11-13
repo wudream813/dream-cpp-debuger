@@ -316,6 +316,10 @@ class GDBSession extends EventEmitter {
     }
     await this.sendCommand('-gdb-set print elements 64').catch(() => {});
     await this.sendCommand('-gdb-set print repeats 32').catch(() => {});
+    // GDB refuses to read any value larger than max-value-size (64 KiB default),
+    // which made arrays of more than ~16k ints unreadable. Previews stay small
+    // because `print elements`/`print repeats` still bound the printed text.
+    await this.sendCommand('-gdb-set max-value-size unlimited').catch(() => {});
     await this.sendCommand('-gdb-set pagination off').catch(() => {});
     await this.sendCommand('-gdb-set confirm off').catch(() => {});
     // Skip C++ STL / libstdc++ internal functions when stepping into user code
@@ -1023,6 +1027,12 @@ class GDBSession extends EventEmitter {
         }
       } else {
         items = (formatted.elements || []).slice(0, previewCount).map((value, index) => ({ index, value, editValue: value }));
+        if (items.length < previewCount) {
+          // The bulk read was refused or truncated (e.g. GDB max-value-size);
+          // fall back to reading the preview one element at a time.
+          items = [];
+          for (let i = 0; i < previewCount; i++) items.push(await this._readSequenceItem(expression, kind, i, false, false));
+        }
       }
       // If GDB returned a shortened preview, never claim it is complete.
       const sequence = { kind, length, isChar, items, truncated: items.length < length,
@@ -1464,6 +1474,14 @@ class GDBSession extends EventEmitter {
 
         let formatted = await this._unwrapValueIfNeeded(v.name, v.value, rawType);
         formatted = await this._describeSequence(formatted, rawType);
+        if (!formatted.sequence && formatted.kind === 'uninitialized') {
+          // A bulk read that failed (huge array) must not hide a pageable sequence.
+          const retry = await this._describeSequence(
+            { name: v.name, type: rawType, kind: 'scalar', displayValue: '', elements: null }, rawType);
+          if (retry && retry.sequence && retry.sequence.length > 0) {
+            formatted = { ...retry, tooltip: '整体值过大，已按元素按需读取；可点击元素分页查看' };
+          }
+        }
         const prevVal = this.prevLocalValues.get(v.name);
         const changed = formatted.kind !== 'uninitialized' && prevVal !== undefined && prevVal !== formatted.displayValue;
         if (formatted.kind !== 'uninitialized') {
@@ -1620,7 +1638,19 @@ class GDBSession extends EventEmitter {
           1500
         );
         const totalLen = parseInt(lenRes?.results?.value ?? '0', 10);
-        if (isNaN(totalLen) || totalLen < 0 || totalLen > 100000) {
+        // A real vector never holds more elements than its capacity; this rejects
+        // garbage pointers without imposing an arbitrary element-count limit.
+        let capacity = NaN;
+        try {
+          const capRes = await this.sendCommand(
+            `-data-evaluate-expression "(long long)(${exprOrName}._M_impl._M_end_of_storage - ${exprOrName}._M_impl._M_start)"`,
+            1500
+          );
+          capacity = parseInt(capRes?.results?.value ?? '', 10);
+        } catch (_) {}
+        const lengthSane = !isNaN(totalLen) && totalLen >= 0 && totalLen <= 100000000 &&
+          (isNaN(capacity) || (capacity >= 0 && totalLen <= capacity));
+        if (!lengthSane) {
           return {
             name: exprOrName,
             type: rawType || 'std::vector',
@@ -1740,8 +1770,23 @@ class GDBSession extends EventEmitter {
             sourceLabel: path.basename(sym.file) + (sym.line ? ':' + sym.line : ''), changed };
         } catch (_) {
           if (!same()) { aborted = true; return; }
+          const sourceLabel = path.basename(sym.file) + (sym.line ? ':' + sym.line : '');
+          // Reading the whole value may be refused (huge array, unsupported
+          // setting). The variable is still pageable through its element
+          // expressions, so keep it inspectable instead of hiding it.
+          let recovered = null;
+          try {
+            const blank = { name: sym.id, type: sym.type, kind: 'scalar', displayValue: '', elements: null };
+            const described = await this._describeSequence(blank, sym.type, sym.expression, true);
+            if (described && described.sequence) recovered = described;
+          } catch (_) {}
+          if (recovered) {
+            entries[index] = { ...recovered, name: sym.id, displayName: sym.name, expression: sym.expression,
+              sourceLabel, changed: false, tooltip: '整体值过大，已按元素按需读取；可点击元素分页查看' };
+            continue;
+          }
           entries[index] = { name: sym.id, displayName: sym.name, expression: sym.expression, type: sym.type,
-            sourceLabel: path.basename(sym.file) + (sym.line ? ':' + sym.line : ''), kind: 'uninitialized',
+            sourceLabel, kind: 'uninitialized',
             displayValue: '无法读取', tooltip: '可能未初始化或已被优化', elements: null, changed: false };
         }
       }

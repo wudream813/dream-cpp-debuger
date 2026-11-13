@@ -162,7 +162,87 @@ async function testLargeGlobals() {
     fs.rmSync(gridDir, { recursive: true, force: true });
   }
 
-  // ── 3. Flat index helpers ──
+  // ── 3. Arrays of 1e5 elements and beyond (GDB max-value-size) ──
+  const hugeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dream-globals-huge-'));
+  const hugeSource = path.join(hugeDir, 'main.cpp');
+  fs.writeFileSync(hugeSource, [
+    '#include <vector>',
+    'int gbig[100000];',
+    'std::vector<int> gbigvec(120000, 6);',
+    'int ggrid[300][400];',
+    'char gtext[100000];',
+    'int main(){',
+    '  gbig[99999] = 42;',
+    '  gbigvec[119999] = 13;',
+    '  ggrid[299][399] = 7;',
+    '  gtext[99999] = 65;',
+    '  int lbig[100000];',
+    '  lbig[99999] = 24;',
+    '  int stop = 1;',
+    '  return stop + lbig[99999];',
+    '}', ''
+  ].join('\n'));
+  const hugeSession = new GDBSession();
+  try {
+    const built = await compileSourceFile(hugeSource, { vectorHelpers: true });
+    assert(built.success, built.stderr);
+    let stopped = waitForStop(hugeSession);
+    await hugeSession.start({ executable: built.executable, sourceFile: hugeSource, cwd: hugeDir, stopAtMain: true });
+    await stopped;
+    await hugeSession.setBreakpoint(hugeSource, 13); // int stop = 1;
+    stopped = waitForStop(hugeSession);
+    await hugeSession.continue();
+    await stopped;
+    await settle(hugeSession);
+    const ctx = hugeSession._pauseContext();
+
+    // GDB's 64 KiB max-value-size used to make these read as "uninitialized".
+    const big = hugeSession.globals.find(v => v.displayName === 'gbig');
+    assert(big && big.sequence, 'int [100000] must be inspectable');
+    assert.equal(big.sequence.length, 100000);
+    assert.notEqual(big.kind, 'uninitialized');
+    const bigPage = await hugeSession.getSequencePage(big.name, 99998, 2, ctx, 'global');
+    assert.equal(bigPage.length, 100000);
+    assert.equal(bigPage.items[bigPage.items.length - 1].value, '42');
+
+    // The old hard-coded 100000 element cap on std::vector is gone.
+    const bigvec = hugeSession.globals.find(v => v.displayName === 'gbigvec');
+    assert(bigvec && bigvec.sequence, 'vector with 120000 elements must be inspectable');
+    assert.equal(bigvec.sequence.length, 120000);
+    const vecPage = await hugeSession.getSequencePage(bigvec.name, 119998, 2, ctx, 'global');
+    assert.equal(vecPage.items[vecPage.items.length - 1].value, '13');
+
+    // A 300x400 grid (120k cells) still pages and edits per cell.
+    const grid = hugeSession.globals.find(v => v.displayName === 'ggrid');
+    assert(grid && grid.sequence, 'int [300][400] must be inspectable');
+    assert.deepStrictEqual(grid.sequence.dimensions, [300, 400]);
+    assert.equal(grid.sequence.length, 120000);
+    const gridPage = await hugeSession.getSequencePage(grid.name, 119998, 2, ctx, 'global');
+    assert.equal(gridPage.items[gridPage.items.length - 1].label, '[299][399]');
+    assert.equal(gridPage.items[gridPage.items.length - 1].value, '7');
+
+    // Large char arrays keep byte-wise paging.
+    const text = hugeSession.globals.find(v => v.displayName === 'gtext');
+    assert(text && text.sequence && text.sequence.isChar);
+    assert.equal(text.sequence.length, 100000);
+    const textPage = await hugeSession.getSequencePage(text.name, 99998, 2, ctx, 'global');
+    assert.equal(textPage.items[textPage.items.length - 1].value, 'A');
+
+    // Large local arrays stay readable and writable.
+    const lbig = hugeSession.locals.find(v => v.name === 'lbig');
+    assert(lbig && lbig.sequence, 'local int [100000] must be inspectable');
+    assert.equal(lbig.sequence.length, 100000);
+    const localPage = await hugeSession.getSequencePage('lbig', 99998, 2, ctx);
+    assert.equal(localPage.items[localPage.items.length - 1].value, '24');
+    await hugeSession.setSequenceElement('lbig', 0, '99', ctx);
+    const afterWrite = await hugeSession.getSequencePage('lbig', 0, 1, ctx);
+    assert.equal(afterWrite.items[0].value, '99');
+  } finally {
+    await hugeSession.stop();
+    fs.rmSync(hugeDir, { recursive: true, force: true });
+  }
+
+  // ── 4. Flat index helpers ──
   const helper = new GDBSession();
   assert.equal(helper._subscriptForIndex('a', [12, 9], 20), 'a[2][2]');
   assert.equal(helper._subscriptForIndex('a', [3, 4, 5], 0), 'a[0][0][0]');
@@ -173,7 +253,7 @@ async function testLargeGlobals() {
   assert.equal(helper._arrayElementCount([12, 9]), 108);
   assert.equal(helper._arrayElementCount([]), null);
 
-  // ── 4. The dashboard has no "load more" cap any more ──
+  // ── 5. The dashboard has no "load more" cap any more ──
   const { JSDOM } = require('jsdom');
   const { getDashboardHtml } = require('../src/dashboardHtml');
   const messages = [];
