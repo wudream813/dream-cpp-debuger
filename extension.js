@@ -91,7 +91,8 @@ class DreamDebugController {
     this.compileQueue = Promise.resolve();
     this.session = new GDBSession({
       gdbPath: this.config.get('gdbPath', 'gdb'),
-      maxArrayPreview: this.config.get('maxArrayPreview', 16)
+      maxArrayPreview: this.config.get('maxArrayPreview', 16),
+      maxVisibleVariables: this.config.get('maxVisibleVariables', 15)
     });
 
     this.stdinMode = 'text';
@@ -569,6 +570,8 @@ class DreamDebugController {
 
         this.session.gdbPath = this.config.get('gdbPath', 'gdb');
         this.session.maxArrayPreview = this.config.get('maxArrayPreview', 16);
+        this.session.maxVisibleVariables = Math.max(1,
+          Math.min(1000, Math.trunc(Number(this.config.get('maxVisibleVariables', 15))) || 15));
 
         let outputCapture = null;
         try {
@@ -1042,6 +1045,15 @@ class DreamDebugController {
         this.session.programOutput = '';
         this.pushSnapshotToWebview();
         break;
+      case 'showMoreGlobals': {
+        try {
+          await this.session.showMoreGlobals(msg.all ? 'all' : this.config.get('maxVisibleVariables', 15));
+        } catch (err) {
+          vscode.window.showErrorMessage(`展开全局变量失败：${err.message}`);
+          this.pushSnapshotToWebview();
+        }
+        break;
+      }
       case 'addWatch':
         await this.session.addWatch(msg.expr);
         break;

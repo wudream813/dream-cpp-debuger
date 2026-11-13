@@ -52,7 +52,7 @@ async function testLargeGlobals() {
     '}', ''
   ].join('\n'));
 
-  const session = new GDBSession();
+  const session = new GDBSession({ maxVisibleVariables: 200 });
   try {
     const built = await compileSourceFile(source, { vectorHelpers: true });
     assert(built.success, built.stderr);
@@ -65,10 +65,10 @@ async function testLargeGlobals() {
     await stopped;
     await settle(session);
 
-    // Everything is shown at once, with no paging and no hidden tail.
+    // With a window large enough, nothing is hidden any more.
     assert.equal(session.globalsTotal, 152, session.globalsInfo);
     assert.equal(session.globals.length, 152, session.globalsInfo);
-    assert.equal(session.getSnapshot().globalsHasMore, undefined);
+    assert.equal(session.getSnapshot().globalsHasMore, false);
     const nums = session.globals.find(v => v.displayName === 'tailnums');
     const bag = session.globals.find(v => v.displayName === 'tailbag');
     assert(nums && bag, 'tail globals must be visible');
@@ -266,7 +266,7 @@ async function testLargeGlobals() {
   assert.equal(helper._arrayElementCount([12, 9]), 108);
   assert.equal(helper._arrayElementCount([]), null);
 
-  // ── 5. The dashboard has no "load more" cap any more ──
+  // ── 5. Panel cap: 15 cards by default, adjustable and expandable ──
   const { JSDOM } = require('jsdom');
   const { getDashboardHtml } = require('../src/dashboardHtml');
   const messages = [];
@@ -276,17 +276,53 @@ async function testLargeGlobals() {
   });
   const doc = dom.window.document;
   const card = (name) => ({ id: name, name, displayName: name, type: 'int', kind: 'scalar', displayValue: '1', elements: null });
-  const globals = Array.from({ length: 420 }, (_, i) => card('g' + i));
-  dom.window.dispatchEvent(new dom.window.MessageEvent('message', {
-    data: { type: 'snapshot', snapshot: {
-      runId: 1, state: 'paused', sessionId: 1, pauseId: 2, currentFrame: 0,
-      locals: [], watches: [], stack: [], breakpoints: [], registers: [],
-      globals, globalsTotal: globals.length, globalsInfo: ''
-    } }
-  }));
-  assert.equal(doc.getElementById('globalsMore'), null, 'no load-more control');
-  assert.equal(doc.getElementById('globalsCount').textContent, '420 项');
-  assert.equal(doc.querySelectorAll('#globalsContainer .var-item').length, 420);
+  const send = (snapshot) => dom.window.dispatchEvent(new dom.window.MessageEvent('message', { data: { type: 'snapshot', snapshot } }));
+  const base = {
+    runId: 1, state: 'paused', sessionId: 1, pauseId: 2, currentFrame: 0,
+    locals: [], watches: [], stack: [], breakpoints: [], registers: [], globalsInfo: ''
+  };
+  const cards = (prefix, n) => Array.from({ length: n }, (_, i) => card(prefix + i));
+  const cardsIn = (id) => doc.querySelectorAll('#' + id + ' .var-item').length;
+
+  // Default 15: 40 locals and 200 globals render only 15 cards each.
+  send({ ...base, maxVisibleVariables: 15, locals: cards('local', 40),
+    globals: cards('global', 15), globalsTotal: 200, globalsHasMore: true });
+  assert.equal(cardsIn('localsContainer'), 15, 'locals are capped at the panel limit');
+  assert.equal(doc.getElementById('localsCount').textContent, '15 / 40 项');
+  assert.equal(cardsIn('globalsContainer'), 15);
+  assert.equal(doc.getElementById('globalsCount').textContent, '15 / 200 项');
+  assert.match(doc.querySelector('#globalsContainer .list-more').textContent, /已显示 15 \/ 200 项/);
+
+  // Expanding locals is local to the webview (no extra GDB work).
+  const localsButtons = doc.querySelectorAll('#localsContainer .list-more button');
+  assert.equal(localsButtons.length, 2);
+  localsButtons[0].click();
+  assert.equal(cardsIn('localsContainer'), 30);
+  doc.querySelectorAll('#localsContainer .list-more button')[1].click();
+  assert.equal(cardsIn('localsContainer'), 40);
+  assert.equal(doc.getElementById('localsCount').textContent, '40 项');
+
+  // Expanding globals asks the extension to read the next window.
+  messages.length = 0;
+  doc.querySelectorAll('#globalsContainer .list-more button')[0].click();
+  assert(messages.some(m => m.type === 'showMoreGlobals' && !m.all), 'step expand must request more globals');
+  messages.length = 0;
+  doc.querySelectorAll('#globalsContainer .list-more button')[1].click();
+  assert(messages.some(m => m.type === 'showMoreGlobals' && m.all === true), 'show-all must request every global');
+
+  // The configured limit is honoured, and the cap never hides the count.
+  send({ ...base, pauseId: 3, maxVisibleVariables: 3, locals: cards('local', 7),
+    globals: cards('global', 3), globalsTotal: 7, globalsHasMore: true });
+  assert.equal(cardsIn('localsContainer'), 3);
+  assert.equal(cardsIn('globalsContainer'), 3);
+  assert.equal(doc.getElementById('globalsCount').textContent, '3 / 7 项');
+
+  // Nothing hidden: no expand row at all.
+  send({ ...base, pauseId: 4, maxVisibleVariables: 15, locals: cards('local', 2),
+    globals: cards('global', 2), globalsTotal: 2, globalsHasMore: false });
+  assert.equal(doc.getElementById('globalsContainer').querySelector('.list-more'), null);
+  assert.equal(doc.getElementById('localsContainer').querySelector('.list-more'), null);
+  assert.equal(doc.getElementById('globalsCount').textContent, '2 项');
 }
 
 module.exports = { testLargeGlobals };

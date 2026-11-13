@@ -64,8 +64,18 @@ function quoteInferiorArgument(value) {
 }
 
 // Global values are read in parallel batches; MI responses are matched by
-// token, so a batch keeps large symbol tables fast without a display limit.
+// token, so a batch keeps large symbol tables fast.
 const GLOBALS_EVAL_CONCURRENCY = 8;
+// Panels only render (and evaluate) this many variable cards by default; the
+// user can raise the window or show everything from the panel header.
+const DEFAULT_VISIBLE_VARIABLES = 15;
+const MAX_VISIBLE_VARIABLES = 1000;
+
+function normalizeVisibleVariables(value) {
+  const size = Math.trunc(Number(value));
+  if (!Number.isFinite(size) || size < 1) return DEFAULT_VISIBLE_VARIABLES;
+  return Math.min(size, MAX_VISIBLE_VARIABLES);
+}
 // Ask GDB for every symbol it knows (its own default is a hard 200).
 const GLOBALS_SYMBOL_MAX_RESULTS = 100000;
 
@@ -74,6 +84,7 @@ class GDBSession extends EventEmitter {
     super();
     this.gdbPath = options.gdbPath || 'gdb';
     this.maxArrayPreview = options.maxArrayPreview || 16;
+    this.maxVisibleVariables = normalizeVisibleVariables(options.maxVisibleVariables);
 
     this.proc = null;
     this.sessionId = 0;
@@ -104,6 +115,7 @@ class GDBSession extends EventEmitter {
     this.globals = [];
     this._globalSymbols = null;
     this.globalsTotal = 0;
+    this.globalsLimit = this.maxVisibleVariables;
     this.globalsInfo = '';
     this.prevGlobalValues = new Map();
     this.prevLocalValues = new Map();
@@ -165,6 +177,7 @@ class GDBSession extends EventEmitter {
     this._globalSymbols = null;
     this.globals = [];
     this.globalsTotal = 0;
+    this.globalsLimit = this.maxVisibleVariables;
     this.globalsInfo = '';
     this.currentFrame = 0;
     this.inferiorPid = null;
@@ -1726,9 +1739,11 @@ class GDBSession extends EventEmitter {
         this._globalSymbols = result.symbols;
         this.globalsInfo = result.info;
       }
-      // No display limit: every discovered symbol is read and shown.
+      // Only the visible window is read from GDB (default 15, configurable and
+      // expandable); the total is kept so the panel can show what is hidden.
       this.globalsTotal = this._globalSymbols.length;
-      const entries = await this._evaluateGlobalSymbols(this._globalSymbols, same);
+      const visible = this._globalSymbols.slice(0, this._globalsWindow());
+      const entries = await this._evaluateGlobalSymbols(visible, same);
       if (!same() || !entries) return;
       this.globals = entries;
     } catch (_) {
@@ -1741,9 +1756,37 @@ class GDBSession extends EventEmitter {
     }
   }
 
+  /** How many global symbols the panel currently shows (and GDB evaluates). */
+  _globalsWindow() {
+    const total = Array.isArray(this._globalSymbols) ? this._globalSymbols.length : 0;
+    const limit = Math.trunc(Number(this.globalsLimit));
+    const wanted = Number.isFinite(limit) && limit > 0 ? limit : this.maxVisibleVariables;
+    return Math.min(total, Math.max(this.maxVisibleVariables, wanted));
+  }
+
   /**
-   * Read the current value of every global symbol. Requests are pipelined a few
-   * at a time (MI replies are matched by token) so large symbol tables stay fast.
+   * Reveal more global variables: `count` adds a page, the string 'all' shows
+   * every discovered symbol. Each newly visible symbol is read from GDB.
+   */
+  async showMoreGlobals(count) {
+    if (this.state !== 'paused' || !this.proc) throw new Error('仅在暂停时才能展开更多全局变量');
+    if (!Array.isArray(this._globalSymbols)) return false;
+    const total = this._globalSymbols.length;
+    if (this.globals.length >= total) return false;
+    const step = Math.trunc(Number(count));
+    const target = count === 'all' ? total
+      : Math.min(total, this._globalsWindow() + (Number.isFinite(step) && step > 0 ? step : this.maxVisibleVariables));
+    if (target <= this.globals.length) return false;
+    this.globalsLimit = target;
+    await this._refreshGlobals();
+    if (this.state === 'paused') this._emitSnapshot();
+    return true;
+  }
+
+  /**
+   * Read the current value of every visible global symbol. Requests are
+   * pipelined a few at a time (MI replies are matched by token) so large
+   * symbol tables stay fast.
    */
   async _evaluateGlobalSymbols(symbols, same) {
     const entries = new Array(symbols.length);
@@ -2135,6 +2178,8 @@ class GDBSession extends EventEmitter {
       locals: inactive ? [] : this.locals,
       globals: inactive ? [] : this.globals,
       globalsTotal: inactive ? 0 : (this._globalSymbols ? this._globalSymbols.length : this.globals.length),
+      globalsHasMore: !inactive && !!this._globalSymbols && this.globals.length < this._globalSymbols.length,
+      maxVisibleVariables: this.maxVisibleVariables,
       globalsInfo: inactive ? '' : this.globalsInfo,
       watches: inactive ? this.watches.map(w => ({ ...w, value: '程序已结束', type: '', kind: 'scalar', elements: null, error: null })) : this.watches,
       breakpoints: this.getBreakpointsList(),

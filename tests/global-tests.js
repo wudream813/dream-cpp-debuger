@@ -51,15 +51,22 @@ async function testGlobals(){
  // Discovery keeps every symbol: no truncation at 100.
  const discovered=await fake._discoverGlobalSymbols();
  assert.equal(discovered.symbols.length,105);assert.equal(discovered.symbols[104].name,'v104');assert.equal(discovered.info,'');
- // Every symbol is evaluated at once: there is no 100 item display limit.
+ // Symbols are evaluated in the visible window; expanding re-reads the rest.
  fake.sendCommand=async(cmd)=>cmd.startsWith('-symbol-info-variables')
    ? {results:{symbols:{debug:[{fullname:'/tmp/proj/main.cpp',symbols:Array.from({length:105},(_,i)=>({name:'v'+i,type:'int'}))}]}}}
    : {results:{value:'1'}};
  fake._globalSymbols=null;await fake._refreshGlobals();
- assert.equal(fake.globals.length,105);assert.equal(fake.globalsTotal,105);
- assert.equal(fake.globalsInfo,'');assert.equal(fake.getSnapshot().globalsTotal,105);
- assert.equal(fake.getSnapshot().globalsHasMore,undefined);
- assert.equal(fake.globals[104].displayName,'v104');
+ // The panel keeps a bounded window (default 15) but remembers the real total.
+ assert.equal(fake.globals.length,15);assert.equal(fake.globalsTotal,105);
+ const fakeSnap=fake.getSnapshot();
+ assert.equal(fakeSnap.globalsTotal,105);assert.equal(fakeSnap.globalsHasMore,true);
+ assert.equal(fakeSnap.maxVisibleVariables,15);
+ assert.equal(await fake.showMoreGlobals(15),true);
+ assert.equal(fake.globals.length,30);
+ assert.equal(await fake.showMoreGlobals('all'),true);
+ assert.equal(fake.globals.length,105);assert.equal(fake.getSnapshot().globalsHasMore,false);
+ assert.equal(await fake.showMoreGlobals('all'),false);
+ fake.state='running';await assert.rejects(fake.showMoreGlobals('all'),/暂停/);fake.state='paused';
  fake._globalSymbols=null;fake.sendCommand=async()=>{throw Error('unsupported')};
  await fake._refreshGlobals();assert(fake.globalsInfo.includes('不支持'));
  fake._globalSymbols=[{id:'global_0',name:'broken',file:'/tmp/proj/main.cpp',line:4,type:'int',expression:'broken'}];

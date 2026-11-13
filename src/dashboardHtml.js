@@ -613,6 +613,34 @@ function getDashboardHtml(options = {}) {
       text-align: center;
       padding: 12px 6px;
     }
+
+    /* Panel cap: only the first N cards are rendered, the rest stay one click away */
+    .list-more {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      justify-content: center;
+      flex-wrap: wrap;
+      padding: 6px 4px 2px;
+      font-size: 12px;
+      color: var(--fg-muted);
+      font-weight: 600;
+    }
+    .list-more button {
+      background: var(--bg-card-header);
+      border: 1px dashed var(--border-strong);
+      color: var(--fg-main);
+      cursor: pointer;
+      padding: 4px 10px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .list-more button:hover {
+      background: var(--bg-hover);
+      border-color: var(--border-focus);
+    }
+    .list-more button[disabled] { cursor: progress; opacity: .7; }
   </style>
 </head>
 <body>
@@ -897,6 +925,8 @@ function getDashboardHtml(options = {}) {
       }
 
       let currentContext = null, sequenceState = null, sequenceRequest = 0, currentBusy = false, currentRevision = 0, menuState = null;
+      // Panel cap state: how many cards each list currently renders.
+      let currentSnapshot = null, localsVisible = 0, localsVisiblePause = null;
       const overlay = document.getElementById('sequenceOverlay');
       const sequenceMessage = document.getElementById('sequenceMessage');
       const sequenceCells = document.getElementById('sequenceCells');
@@ -1009,15 +1039,37 @@ function getDashboardHtml(options = {}) {
         el.btnRestart.disabled = !!snap.isCompiling;
         if (snap.isCompiling) el.statusPill.textContent = '正在编译…';
 
-        // Locals
+        // Locals - the panel renders at most maxVisibleVariables cards (default 15)
+        currentSnapshot = snap;
+        const maxVisible = Math.max(1, Number(snap.maxVisibleVariables) || 15);
         const locals = Array.isArray(snap.locals) ? snap.locals : [];
-        el.localsCount.textContent = locals.length + ' 项';
+        const pauseKey = (snap.sessionId || 0) + ':' + (snap.pauseId || 0);
+        if (localsVisiblePause !== pauseKey) { localsVisiblePause = pauseKey; localsVisible = maxVisible; }
+        if (!localsVisible) localsVisible = maxVisible;
+        const shownLocals = locals.slice(0, localsVisible);
+        el.localsCount.textContent = locals.length > shownLocals.length
+          ? shownLocals.length + ' / ' + locals.length + ' 项'
+          : locals.length + ' 项';
         if (locals.length === 0) {
           el.localsContainer.innerHTML = '<div class="empty-hint">' +
             (isPaused ? '当前栈帧无局部变量' : '当 GDB 在断点暂停时，此处展示局部变量与 STL/数组图形化视图') +
           '</div>';
         } else {
-          el.localsContainer.innerHTML = locals.map((v) => renderVariableCard(v, { isWatch: false })).join('');
+          el.localsContainer.innerHTML = shownLocals.map((v) => renderVariableCard(v, { isWatch: false })).join('');
+          if (locals.length > shownLocals.length) {
+            const more = document.createElement('div');
+            more.className = 'list-more';
+            more.innerHTML = '<span>面板最多显示 ' + maxVisible + ' 项（dreamCppDebug.maxVisibleVariables）</span>';
+            const stepBtn = document.createElement('button');
+            stepBtn.textContent = '再显示 ' + maxVisible + ' 项';
+            stepBtn.addEventListener('click', () => { localsVisible += maxVisible; renderSnapshot(currentSnapshot); });
+            const allBtn = document.createElement('button');
+            allBtn.textContent = '显示全部 ' + locals.length + ' 项';
+            allBtn.addEventListener('click', () => { localsVisible = locals.length; renderSnapshot(currentSnapshot); });
+            more.appendChild(stepBtn);
+            more.appendChild(allBtn);
+            el.localsContainer.appendChild(more);
+          }
           el.localsContainer.querySelectorAll('[data-seq-open]').forEach(btn => btn.addEventListener('click', () => {
             if (!currentContext) return;
             sequenceState = { name: btn.dataset.seqOpen, context: currentContext, offset: 0 };
@@ -1040,10 +1092,36 @@ function getDashboardHtml(options = {}) {
 
         // Globals are deliberately read-only; their symbol identity includes the source file.
         const globals = Array.isArray(snap.globals) && isPaused ? snap.globals : [];
-        el.globalsCount.textContent = globals.length + ' 项';
+        const globalsTotal = Math.max(globals.length, Number(snap.globalsTotal) || 0);
+        el.globalsCount.textContent = globalsTotal > globals.length
+          ? globals.length + ' / ' + globalsTotal + ' 项'
+          : globals.length + ' 项';
         el.globalsInfo.textContent = !isPaused ? '暂停时展示源文件目录中的全局变量（只读）。' :
           (snap.globalsInfo || (globals.length ? '只读 · 包含当前源文件目录中的全局及文件静态变量' : '未发现可读取的全局变量。'));
         el.globalsContainer.innerHTML = globals.map(v => renderVariableCard(v, { isGlobal: true })).join('');
+        if (snap.globalsHasMore) {
+          const more = document.createElement('div');
+          more.className = 'list-more';
+          more.innerHTML = '<span>已显示 ' + globals.length + ' / ' + globalsTotal + ' 项</span>';
+          const stepBtn = document.createElement('button');
+          stepBtn.textContent = '再显示 ' + maxVisible + ' 项';
+          stepBtn.addEventListener('click', () => {
+            stepBtn.disabled = true;
+            stepBtn.textContent = '正在读取…';
+            vscode.postMessage({ type: 'showMoreGlobals' });
+          });
+          const allBtn = document.createElement('button');
+          allBtn.textContent = '显示全部 ' + globalsTotal + ' 项';
+          allBtn.title = '变量很多时会明显变慢';
+          allBtn.addEventListener('click', () => {
+            allBtn.disabled = true;
+            allBtn.textContent = '正在读取…';
+            vscode.postMessage({ type: 'showMoreGlobals', all: true });
+          });
+          more.appendChild(stepBtn);
+          more.appendChild(allBtn);
+          el.globalsContainer.appendChild(more);
+        }
         el.globalsContainer.querySelectorAll('[data-seq-open]').forEach(btn => btn.addEventListener('click', () => {
           if (!currentContext) return;
           const variable = globals.find(v => v.name === btn.dataset.seqOpen);
