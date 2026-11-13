@@ -63,27 +63,17 @@ function quoteInferiorArgument(value) {
   return "'" + text.replace(/'/g, "'\\''") + "'";
 }
 
-// Global symbols are discovered once and evaluated in windows of this size.
-// The window is bounded so huge translation units never spam GDB with thousands
-// of synchronous -data-evaluate-expression round trips.
-const DEFAULT_GLOBALS_PAGE_SIZE = 100;
-const MAX_GLOBALS_PAGE_SIZE = 1000;
-const MAX_GLOBAL_SYMBOLS = 2000;
-
-function normalizeGlobalsPageSize(value) {
-  const size = Math.trunc(Number(value));
-  if (!Number.isFinite(size) || size < 1) return DEFAULT_GLOBALS_PAGE_SIZE;
-  return Math.min(size, MAX_GLOBALS_PAGE_SIZE);
-}
+// Global values are read in parallel batches; MI responses are matched by
+// token, so a batch keeps large symbol tables fast without a display limit.
+const GLOBALS_EVAL_CONCURRENCY = 8;
+// Ask GDB for every symbol it knows (its own default is a hard 200).
+const GLOBALS_SYMBOL_MAX_RESULTS = 100000;
 
 class GDBSession extends EventEmitter {
   constructor(options = {}) {
     super();
     this.gdbPath = options.gdbPath || 'gdb';
     this.maxArrayPreview = options.maxArrayPreview || 16;
-    // Globals are evaluated lazily: all symbols are discovered, but only the
-    // first window is read from GDB so a large amount of globals stays usable.
-    this.globalsPageSize = normalizeGlobalsPageSize(options.globalsPageSize);
 
     this.proc = null;
     this.sessionId = 0;
@@ -113,9 +103,7 @@ class GDBSession extends EventEmitter {
     this.locals = [];
     this.globals = [];
     this._globalSymbols = null;
-    this.globalsLimit = this.globalsPageSize;
     this.globalsTotal = 0;
-    this._globalsDiscoveryInfo = '';
     this.globalsInfo = '';
     this.prevGlobalValues = new Map();
     this.prevLocalValues = new Map();
@@ -177,8 +165,6 @@ class GDBSession extends EventEmitter {
     this._globalSymbols = null;
     this.globals = [];
     this.globalsTotal = 0;
-    this.globalsLimit = this.globalsPageSize;
-    this._globalsDiscoveryInfo = '';
     this.globalsInfo = '';
     this.currentFrame = 0;
     this.inferiorPid = null;
@@ -936,17 +922,67 @@ class GDBSession extends EventEmitter {
     return { base: match[1].trim(), dims };
   }
 
-  async _sequenceLength(name, kind) {
-    if (kind !== 'string') return this._getContainerLength(name, kind === 'vector');
+  /** Total number of scalar elements of a multi-dimensional array, or null. */
+  _arrayElementCount(dims) {
+    if (!Array.isArray(dims) || !dims.length) return null;
+    let total = 1;
+    for (const size of dims) {
+      if (!Number.isSafeInteger(size) || size < 0) return null;
+      total *= size;
+      if (!Number.isSafeInteger(total) || total > 10000000) return null;
+    }
+    return total;
+  }
+
+  /** Row-major subscripts for a flat element index, or null for 1-D/unknown. */
+  _arraySubscripts(dims, index) {
+    if (!Array.isArray(dims) || dims.length <= 1) return null;
+    const subscripts = new Array(dims.length);
+    let remainder = Number(index);
+    if (!Number.isSafeInteger(remainder) || remainder < 0) return null;
+    for (let i = dims.length - 1; i >= 0; i--) {
+      if (!Number.isSafeInteger(dims[i]) || dims[i] < 1) return null;
+      subscripts[i] = remainder % dims[i];
+      remainder = Math.floor(remainder / dims[i]);
+    }
+    return subscripts;
+  }
+
+  /**
+   * Build the C subscript expression for a flat element index.
+   * `grid[12][9]` index 20 becomes `grid[2][2]` (row-major, like the language).
+   */
+  _subscriptForIndex(name, dims, index) {
+    const subscripts = this._arraySubscripts(dims, index);
+    if (!subscripts) return `${name}[${Number(index)}]`;
+    return name + subscripts.map(value => `[${value}]`).join('');
+  }
+
+  /** Human-readable element label for a flat index (`[2][2]` for `grid[12][9]`). */
+  _elementLabel(dims, index) {
+    const subscripts = this._arraySubscripts(dims, index);
+    if (!subscripts) return `[${Number(index)}]`;
+    return subscripts.map(value => `[${value}]`).join('');
+  }
+
+  async _sequenceLength(name, kind, dims) {
+    if (kind !== 'string') {
+      if (Array.isArray(dims) && dims.length > 1) {
+        const total = this._arrayElementCount(dims);
+        if (total === null) throw new Error('无法确认数组边界');
+        return total;
+      }
+      return this._getContainerLength(name, kind === 'vector');
+    }
     const res = await this.sendCommand(`-data-evaluate-expression "(unsigned long)${name}._M_string_length"`);
     const value = String(res?.results?.value ?? '').trim();
     if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))) throw new Error('无法确认字符串长度');
     return Number(value);
   }
 
-  async _readSequenceItem(name, kind, index, isChar, isStringElement = false) {
+  async _readSequenceItem(name, kind, index, isChar, isStringElement = false, dims = null) {
     let expression = kind === 'vector' ? `*(${name}._M_impl._M_start + ${index})` :
-      kind === 'string' ? `${name}._M_dataplus._M_p[${index}]` : `${name}[${index}]`;
+      kind === 'string' ? `${name}._M_dataplus._M_p[${index}]` : this._subscriptForIndex(name, dims, index);
     if (isChar) expression = `(unsigned char)(${expression})`;
     const res = await this.sendCommand(`-data-evaluate-expression "${expression}"`);
     const value = String(res?.results?.value ?? '');
@@ -955,44 +991,49 @@ class GDBSession extends EventEmitter {
       const display = extracted && extracted !== '__UNINITIALIZED__' ? JSON.stringify(unescapeMIString(extracted.slice(1, -1))) : value;
       return { index, value: display, editValue: display };
     }
-    if (!isChar) return { index, value, editValue: value };
+    if (!isChar) return { index, value, editValue: value, ...(Array.isArray(dims) && dims.length > 1 ? { label: this._elementLabel(dims, index) } : {}) };
     const m = value.match(/^\s*(\d+)/);
     if (!m || Number(m[1]) > 255) throw new Error('无法读取字符字节');
     const byte = Number(m[1]);
     const printable = byte >= 32 && byte <= 126;
     const display = printable ? String.fromCharCode(byte) : `0x${byte.toString(16).padStart(2, '0')}`;
-    return { index, value: display, editValue: printable && byte !== 32 ? display : `0x${byte.toString(16).padStart(2, '0')}` };
+    return { index, value: display, editValue: printable && byte !== 32 ? display : `0x${byte.toString(16).padStart(2, '0')}`,
+      ...(Array.isArray(dims) && dims.length > 1 ? { label: this._elementLabel(dims, index) } : {}) };
   }
 
   async _describeSequence(formatted, rawType, expression = formatted.name, readOnly = false) {
     const kind = this._sequenceKind(formatted, rawType);
     if (!kind) return formatted;
     try {
-      const length = await this._sequenceLength(expression, kind);
-      const isChar = kind === 'string' || kind === 'chars' || (kind === 'vector' && /vector\s*<\s*(?:signed |unsigned )?char\b/.test(rawType));
-      const isStringElement = kind === 'vector' && this._vectorElementType(rawType) === 'string';
-      // Multi-dimensional arrays page over their outermost dimension (one row
-      // per item); a row cannot be assigned as a single value, so stay read-only.
+      // Multi-dimensional arrays are paged as a flat list of scalar elements so
+      // every cell stays readable and editable (`grid[2][2]`, not a whole row).
       const dims = kind === 'array' ? this._arrayDimensions(rawType) : null;
       const multiDim = !!dims && dims.dims.length > 1;
+      const length = await this._sequenceLength(expression, kind, multiDim ? dims.dims : null);
+      const isChar = kind === 'string' || kind === 'chars'
+        || (kind === 'vector' && /vector\s*<\s*(?:signed |unsigned )?char\b/.test(rawType))
+        || (multiDim && /\bchar\s*$/.test(dims.base));
+      const isStringElement = kind === 'vector' && this._vectorElementType(rawType) === 'string';
       const previewCount = Math.min(length, Math.max(1, Math.min(this.maxArrayPreview, readOnly ? 8 : 32)));
       let items;
-      if (isChar || isStringElement) {
+      if (isChar || isStringElement || multiDim) {
         items = [];
-        for (let i = 0; i < previewCount; i++) items.push(await this._readSequenceItem(expression, kind, i, isChar, isStringElement));
+        for (let i = 0; i < previewCount; i++) {
+          items.push(await this._readSequenceItem(expression, kind, i, isChar, isStringElement, multiDim ? dims.dims : null));
+        }
       } else {
         items = (formatted.elements || []).slice(0, previewCount).map((value, index) => ({ index, value, editValue: value }));
       }
       // If GDB returned a shortened preview, never claim it is complete.
       const sequence = { kind, length, isChar, items, truncated: items.length < length,
-        editable: !readOnly && !multiDim && !/(?:^|\s)const(?:\s|$)/.test(rawType) };
-      if (multiDim) { sequence.elementEditable = false; sequence.dimensions = dims.dims; }
+        editable: !readOnly && !/(?:^|\s)const(?:\s|$)/.test(rawType) };
+      if (multiDim) sequence.dimensions = dims.dims;
       if (isStringElement) sequence.elementEditable = false;
       if (kind === 'vector') sequence.vectorOps = sequence.editable && !!this._vectorElementType(rawType);
       if (kind === 'string') sequence.stringOps = sequence.editable && rawType.trim() === 'std::string';
       if (kind !== 'string' && kind !== 'chars') {
         const prefix = kind === 'vector' ? `vector[${length}]`
-          : multiDim ? dims.dims.map((size, i) => `[${i === 0 ? length : size}]`).join('')
+          : multiDim ? dims.dims.map(size => `[${size}]`).join('')
           : `[${length}]`;
         formatted = { ...formatted, kind: 'array', elements: items.map(item => item.value),
           displayValue: `${prefix} { ${items.map(item => item.value).join(', ')}${sequence.truncated ? ', …' : ''} }` };
@@ -1123,7 +1164,7 @@ class GDBSession extends EventEmitter {
     const expr = scope === 'global' ? variable.expression : name;
     if (scope === 'global' && !(this._globalSymbols || []).some(v => v.id === name && v.expression === expr)) throw new Error('全局变量不可用');
     const seq = variable.sequence;
-    const length = await this._sequenceLength(expr, seq.kind);
+    const length = await this._sequenceLength(expr, seq.kind, seq.dimensions);
     this._assertPauseContext(context);
     const start = Number(offset);
     const size = Number(pageSize);
@@ -1131,7 +1172,7 @@ class GDBSession extends EventEmitter {
     const items = [];
     for (let i = start; i < Math.min(length, start + size); i++) {
       this._assertPauseContext(context);
-      items.push(await this._readSequenceItem(expr, seq.kind, i, seq.isChar, this._vectorElementType(variable.type) === 'string'));
+      items.push(await this._readSequenceItem(expr, seq.kind, i, seq.isChar, this._vectorElementType(variable.type) === 'string', seq.dimensions));
     }
     this._assertPauseContext(context);
     return { name, offset: start, length, items, isChar: seq.isChar, editable: seq.editable && seq.elementEditable !== false, vectorOps: seq.vectorOps === true, stringOps: seq.stringOps === true, context };
@@ -1157,13 +1198,15 @@ class GDBSession extends EventEmitter {
     const seq = variable.sequence;
     const idx = Number(index);
     if (!Number.isSafeInteger(idx) || idx < 0) throw new Error('索引无效');
-    const length = await this._sequenceLength(name, seq.kind);
+    const length = await this._sequenceLength(name, seq.kind, seq.dimensions);
     this._assertPauseContext(context);
     if (idx >= length) throw new Error('索引越界');
     const input = seq.isChar ? String(this._parseCharacterByte(value)) : String(value ?? '').trim();
-    if (!input || /[\r\n\0]/.test(input) || input.includes('...') || input.includes('…')) throw new Error('元素值无效');
+    // A single element/cell only ever takes a scalar: never a brace list.
+    if (!input || /[\r\n\0]/.test(input) || input.includes('...') || input.includes('…') ||
+        (!seq.isChar && (/[{}]/.test(input) || /^\[.*\]$/.test(input)))) throw new Error('元素值无效');
     const target = seq.kind === 'vector' ? `*(${name}._M_impl._M_start + ${idx})` :
-      seq.kind === 'string' ? `${name}._M_dataplus._M_p[${idx}]` : `${name}[${idx}]`;
+      seq.kind === 'string' ? `${name}._M_dataplus._M_p[${idx}]` : this._subscriptForIndex(name, seq.dimensions, idx);
     const expression = `${target} = ${input}`.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
     await this.sendCommand(`-data-evaluate-expression "${expression}"`);
     this._assertPauseContext(context);
@@ -1614,15 +1657,14 @@ class GDBSession extends EventEmitter {
   async _discoverGlobalSymbols() {
     if (!this.sourceFile) return { symbols: [], info: '无法确定源文件，不能列出全局变量。' };
     const root = path.dirname(path.resolve(this.sourceFile));
-    const result = await this.sendCommand('-symbol-info-variables --max-results 2000', 8000);
+    const result = await this.sendCommand(`-symbol-info-variables --max-results ${GLOBALS_SYMBOL_MAX_RESULTS}`, 15000);
     const debug = result?.results?.symbols?.debug || [];
     const groups = Array.isArray(debug) ? debug : [debug];
     const symbols = [];
     const seen = new Set();
-    let enumerated = 0, skippedUnsafe = false;
+    let skippedUnsafe = false;
     for (const group of groups) {
       const list = Array.isArray(group.symbols) ? group.symbols : group.symbols ? [group.symbols] : [];
-      enumerated += list.length;
       if (!group.fullname) continue;
       const file = path.resolve(group.fullname);
       const relative = path.relative(root, file);
@@ -1631,7 +1673,6 @@ class GDBSession extends EventEmitter {
       const fileForGdb = file.replace(/\\/g, '/');
       if (/[\r\n\0'"]/.test(fileForGdb)) { skippedUnsafe = true; continue; }
       for (const symbol of list) {
-        if (symbols.length >= MAX_GLOBAL_SYMBOLS) break;
         const name = String(symbol.name || '').replace(/\[abi:[A-Za-z0-9_]+\]/g, '');
         if (!/^[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*$/.test(name) || /^(?:std|__gnu_cxx)::/.test(name) || name.split('::').some(part => part.startsWith('__'))) continue;
         const expression = `'${fileForGdb}'::${name}`;
@@ -1641,13 +1682,8 @@ class GDBSession extends EventEmitter {
           type: cleanCppType(symbol.type || ''), expression });
       }
     }
-    // Discovery is intentionally uncapped below MAX_GLOBAL_SYMBOLS: values are
-    // evaluated lazily in windows (see _refreshGlobals), so declaring hundreds
-    // of globals no longer hides the ones beyond the first page.
-    const capped = symbols.length >= MAX_GLOBAL_SYMBOLS || enumerated >= MAX_GLOBAL_SYMBOLS;
-    const info = capped ? `全局变量数量极多，最多列出 ${MAX_GLOBAL_SYMBOLS} 项，部分符号可能未列出。`
-      : skippedUnsafe ? '部分路径含特殊字符的符号未列出。' : '';
-    return { symbols, info };
+    // Every discovered symbol is kept: there is no display limit.
+    return { symbols, info: skippedUnsafe ? '部分路径含特殊字符的符号未列出。' : '' };
   }
 
   async _refreshGlobals() {
@@ -1658,80 +1694,62 @@ class GDBSession extends EventEmitter {
         const result = await this._discoverGlobalSymbols();
         if (!same()) return;
         this._globalSymbols = result.symbols;
-        this._globalsDiscoveryInfo = result.info;
-        this.globalsLimit = this.globalsPageSize;
+        this.globalsInfo = result.info;
       }
+      // No display limit: every discovered symbol is read and shown.
       this.globalsTotal = this._globalSymbols.length;
-      const visible = this._globalSymbols.slice(0, this._globalsWindowSize());
-      const entries = [];
-      for (const sym of visible) {
-        if (!same()) return;
-        try {
-          const safeExpr = sym.expression.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-          const result = await this.sendCommand(`-data-evaluate-expression "${safeExpr}"`, 2000);
-          if (!same()) return;
-          let formatted = await this._unwrapValueIfNeeded(sym.expression, result?.results?.value ?? '', sym.type);
-          formatted.name = sym.id;
-          formatted = await this._describeSequence(formatted, sym.type, sym.expression, true);
-          if (!same()) return;
-          const old = this.prevGlobalValues.get(sym.expression);
-          const changed = old !== undefined && old !== formatted.displayValue;
-          this.prevGlobalValues.set(sym.expression, formatted.displayValue);
-          entries.push({ ...formatted, name: sym.id, displayName: sym.name, expression: sym.expression,
-            sourceLabel: path.basename(sym.file) + (sym.line ? ':' + sym.line : ''), changed });
-        } catch (_) {
-          if (!same()) return;
-          entries.push({ name: sym.id, displayName: sym.name, expression: sym.expression, type: sym.type,
-            sourceLabel: path.basename(sym.file) + (sym.line ? ':' + sym.line : ''), kind: 'uninitialized',
-            displayValue: '无法读取', tooltip: '可能未初始化或已被优化', elements: null, changed: false });
-        }
-      }
-      if (same()) {
-        this.globals = entries;
-        this.globalsInfo = this._globalsInfoText();
-      }
+      const entries = await this._evaluateGlobalSymbols(this._globalSymbols, same);
+      if (!same() || !entries) return;
+      this.globals = entries;
     } catch (_) {
       if (same()) {
         this.globals = [];
         this._globalSymbols = [];
         this.globalsTotal = 0;
-        this._globalsDiscoveryInfo = '';
         this.globalsInfo = '无法列出全局变量；当前 GDB 可能不支持符号查询。';
       }
     }
   }
 
-  /** Number of global symbols whose current value should be read from GDB. */
-  _globalsWindowSize() {
-    const limit = Math.trunc(Number(this.globalsLimit));
-    if (!Number.isFinite(limit) || limit < 1) return this.globalsPageSize;
-    return Math.min(limit, MAX_GLOBAL_SYMBOLS);
-  }
-
-  _globalsInfoText() {
-    const total = Array.isArray(this._globalSymbols) ? this._globalSymbols.length : 0;
-    const shown = this.globals.length;
-    const parts = [this._globalsDiscoveryInfo || ''];
-    if (total > shown) parts.push(`已显示 ${shown} / 共 ${total} 项，点击“加载更多”继续。`);
-    return parts.filter(Boolean).join(' ');
-  }
-
   /**
-   * Evaluate the next window of global symbols. Values are read lazily so a
-   * translation unit with hundreds of globals neither stalls every refresh nor
-   * hides the symbols that come after the first page.
+   * Read the current value of every global symbol. Requests are pipelined a few
+   * at a time (MI replies are matched by token) so large symbol tables stay fast.
    */
-  async loadMoreGlobals(count) {
-    if (this.state !== 'paused' || !this.proc) throw new Error('仅在暂停时才能加载更多全局变量');
-    if (!Array.isArray(this._globalSymbols) || this._globalSymbols.length <= this.globals.length) return false;
-    const step = Math.trunc(Number(count));
-    const increment = Number.isFinite(step) && step > 0 ? step : this.globalsPageSize;
-    const target = Math.min(this._globalSymbols.length, this.globals.length + increment);
-    if (target <= this.globals.length) return false;
-    this.globalsLimit = target;
-    await this._refreshGlobals();
-    this._emitSnapshot();
-    return true;
+  async _evaluateGlobalSymbols(symbols, same) {
+    const entries = new Array(symbols.length);
+    let cursor = 0;
+    let aborted = false;
+    const worker = async () => {
+      while (!aborted) {
+        const index = cursor++;
+        if (index >= symbols.length) return;
+        if (!same()) { aborted = true; return; }
+        const sym = symbols[index];
+        try {
+          const safeExpr = sym.expression.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+          const result = await this.sendCommand(`-data-evaluate-expression "${safeExpr}"`, 2000);
+          if (!same()) { aborted = true; return; }
+          let formatted = await this._unwrapValueIfNeeded(sym.expression, result?.results?.value ?? '', sym.type);
+          formatted.name = sym.id;
+          formatted = await this._describeSequence(formatted, sym.type, sym.expression, true);
+          if (!same()) { aborted = true; return; }
+          const old = this.prevGlobalValues.get(sym.expression);
+          const changed = old !== undefined && old !== formatted.displayValue;
+          this.prevGlobalValues.set(sym.expression, formatted.displayValue);
+          entries[index] = { ...formatted, name: sym.id, displayName: sym.name, expression: sym.expression,
+            sourceLabel: path.basename(sym.file) + (sym.line ? ':' + sym.line : ''), changed };
+        } catch (_) {
+          if (!same()) { aborted = true; return; }
+          entries[index] = { name: sym.id, displayName: sym.name, expression: sym.expression, type: sym.type,
+            sourceLabel: path.basename(sym.file) + (sym.line ? ':' + sym.line : ''), kind: 'uninitialized',
+            displayValue: '无法读取', tooltip: '可能未初始化或已被优化', elements: null, changed: false };
+        }
+      }
+    };
+    const workers = Math.min(GLOBALS_EVAL_CONCURRENCY, Math.max(1, symbols.length));
+    await Promise.all(Array.from({ length: workers }, worker));
+    if (aborted || !same()) return null;
+    return entries.filter(Boolean);
   }
 
   async _refreshWatches() {
@@ -2072,7 +2090,6 @@ class GDBSession extends EventEmitter {
       locals: inactive ? [] : this.locals,
       globals: inactive ? [] : this.globals,
       globalsTotal: inactive ? 0 : (this._globalSymbols ? this._globalSymbols.length : this.globals.length),
-      globalsHasMore: !inactive && !!this._globalSymbols && this.globals.length < this._globalSymbols.length,
       globalsInfo: inactive ? '' : this.globalsInfo,
       watches: inactive ? this.watches.map(w => ({ ...w, value: '程序已结束', type: '', kind: 'scalar', elements: null, error: null })) : this.watches,
       breakpoints: this.getBreakpointsList(),

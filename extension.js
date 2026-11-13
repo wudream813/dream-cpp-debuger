@@ -91,8 +91,7 @@ class DreamDebugController {
     this.compileQueue = Promise.resolve();
     this.session = new GDBSession({
       gdbPath: this.config.get('gdbPath', 'gdb'),
-      maxArrayPreview: this.config.get('maxArrayPreview', 16),
-      globalsPageSize: this.config.get('globalsPageSize', 100)
+      maxArrayPreview: this.config.get('maxArrayPreview', 16)
     });
 
     this.stdinMode = 'text';
@@ -570,7 +569,6 @@ class DreamDebugController {
 
         this.session.gdbPath = this.config.get('gdbPath', 'gdb');
         this.session.maxArrayPreview = this.config.get('maxArrayPreview', 16);
-        this.session.globalsPageSize = this.config.get('globalsPageSize', 100);
 
         let outputCapture = null;
         try {
@@ -1044,15 +1042,6 @@ class DreamDebugController {
         this.session.programOutput = '';
         this.pushSnapshotToWebview();
         break;
-      case 'loadMoreGlobals': {
-        try {
-          await this.session.loadMoreGlobals(this.config.get('globalsPageSize', 100));
-        } catch (err) {
-          vscode.window.showErrorMessage(`加载更多全局变量失败：${err.message}`);
-          this.pushSnapshotToWebview();
-        }
-        break;
-      }
       case 'addWatch':
         await this.session.addWatch(msg.expr);
         break;
@@ -1129,7 +1118,7 @@ class DreamDebugController {
         try {
           this.session._assertPauseContext(context);
           const val = await vscode.window.showInputBox({
-            prompt: `修改 ${msg.name}[${msg.index}]` + (msg.isChar ? '（单字节字符、转义序列或 0x00–0xFF；UTF-8 按字节索引）' : ''),
+            prompt: `修改 ${msg.name}${msg.label || '[' + msg.index + ']'}` + (msg.isChar ? '（单字节字符、转义序列或 0x00–0xFF；UTF-8 按字节索引）' : ''),
             value: msg.currentValue || ''
           });
           if (val !== undefined) await this.session.setSequenceElement(msg.name, msg.index, val, context);

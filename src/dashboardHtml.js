@@ -613,25 +613,6 @@ function getDashboardHtml(options = {}) {
       text-align: center;
       padding: 12px 6px;
     }
-
-    .globals-more {
-      display: block;
-      width: 100%;
-      margin-top: 6px;
-      background: var(--bg-card-header);
-      border: 1px dashed var(--border-strong);
-      color: var(--fg-main);
-      cursor: pointer;
-      padding: 6px 10px;
-      border-radius: 6px;
-      font-size: 12px;
-      font-weight: 700;
-    }
-    .globals-more:hover {
-      background: var(--bg-hover);
-      border-color: var(--border-focus);
-    }
-    .globals-more[disabled] { cursor: progress; opacity: .7; }
   </style>
 </head>
 <body>
@@ -880,8 +861,8 @@ function getDashboardHtml(options = {}) {
           const cells = seq.items.map(item => {
             const editable = seq.editable && seq.elementEditable !== false;
             const vectorData = (seq.vectorOps || seq.stringOps) ? ' data-vector-index="' + item.index + '" data-vector-name="' + escapeHtml(varBaseName) + '" data-vector-char="' + (seq.isChar ? '1' : '0') + '" title="右击：删除或插入"' : '';
-            return '<button class="array-cell" data-seq-index="' + item.index + '" data-seq-name="' + escapeHtml(varBaseName) + '" data-cur-val="' + escapeHtml(item.editValue) + '" data-char="' + (seq.isChar ? '1' : '0') + '" data-editable="' + (editable ? '1' : '0') + '"' + vectorData + (!editable && !(seq.vectorOps || seq.stringOps) ? ' disabled' : '') + (!editable ? ' aria-label="此元素不支持修改值；右击可插入或删除"' : '') + '>' +
-              '<span class="array-idx">[' + item.index + ']</span><span class="array-v">' + escapeHtml(item.value) + '</span></button>';
+            return '<button class="array-cell" data-seq-index="' + item.index + '" data-seq-label="' + escapeHtml(item.label || '') + '" data-seq-name="' + escapeHtml(varBaseName) + '" data-cur-val="' + escapeHtml(item.editValue) + '" data-char="' + (seq.isChar ? '1' : '0') + '" data-editable="' + (editable ? '1' : '0') + '"' + vectorData + (!editable && !(seq.vectorOps || seq.stringOps) ? ' disabled' : '') + (!editable ? ' aria-label="此元素不支持修改值；右击可插入或删除"' : '') + '>' +
+              '<span class="array-idx">' + escapeHtml(item.label || ('[' + item.index + ']')) + '</span><span class="array-v">' + escapeHtml(item.value) + '</span></button>';
           }).join('');
           const more = seq.truncated ? '<button class="array-cell" data-seq-open="' + escapeHtml(varBaseName) + '" data-offset="' + seq.items.length + '" title="分页查看剩余元素">…<span class="array-idx">查看更多</span></button>' : '';
           const empty = (seq.vectorOps || seq.stringOps) && seq.length === 0 ? '<button class="array-cell" data-vector-empty="' + escapeHtml(varBaseName) + '" data-vector-char="' + (seq.isChar ? '1' : '0') + '" title="空容器：添加第一个元素">＋<span class="array-idx">添加首个元素</span></button>' : '';
@@ -966,8 +947,8 @@ function getDashboardHtml(options = {}) {
       }
       prev.addEventListener('click', () => requestSequence(Math.max(0, sequenceState.offset - 32)));
       next.addEventListener('click', () => requestSequence(sequenceState.offset + 32));
-      function editSequence(name, index, val, isChar) {
-        vscode.postMessage({ type: 'editSequenceElement', name, index, currentValue: val, isChar, context: currentContext, requestId: sequenceRequest });
+      function editSequence(name, index, val, isChar, label) {
+        vscode.postMessage({ type: 'editSequenceElement', name, index, label: label || '', currentValue: val, isChar, context: currentContext, requestId: sequenceRequest });
       }
       function renderSnapshot(snap) {
         if (!snap) return;
@@ -1044,7 +1025,7 @@ function getDashboardHtml(options = {}) {
             overlay.hidden = false; requestSequence(Number(btn.dataset.offset));
           }));
           el.localsContainer.querySelectorAll('[data-seq-index]').forEach(btn => btn.addEventListener('click', () => {
-            if (currentContext && btn.dataset.editable === '1') editSequence(btn.dataset.seqName, Number(btn.dataset.seqIndex), btn.dataset.curVal, btn.dataset.char === '1');
+            if (currentContext && btn.dataset.editable === '1') editSequence(btn.dataset.seqName, Number(btn.dataset.seqIndex), btn.dataset.curVal, btn.dataset.char === '1', btn.dataset.seqLabel);
           }));
           el.localsContainer.querySelectorAll('[data-edit-var]').forEach((btn) => {
             btn.addEventListener('click', () => {
@@ -1059,26 +1040,10 @@ function getDashboardHtml(options = {}) {
 
         // Globals are deliberately read-only; their symbol identity includes the source file.
         const globals = Array.isArray(snap.globals) && isPaused ? snap.globals : [];
-        el.globalsCount.textContent = snap.globalsHasMore && Number(snap.globalsTotal) > globals.length
-          ? globals.length + ' / ' + Number(snap.globalsTotal) + ' 项'
-          : globals.length + ' 项';
+        el.globalsCount.textContent = globals.length + ' 项';
         el.globalsInfo.textContent = !isPaused ? '暂停时展示源文件目录中的全局变量（只读）。' :
           (snap.globalsInfo || (globals.length ? '只读 · 包含当前源文件目录中的全局及文件静态变量' : '未发现可读取的全局变量。'));
         el.globalsContainer.innerHTML = globals.map(v => renderVariableCard(v, { isGlobal: true })).join('');
-        if (snap.globalsHasMore) {
-          const total = Number(snap.globalsTotal) || globals.length;
-          const more = document.createElement('button');
-          more.className = 'globals-more';
-          more.id = 'globalsMore';
-          more.title = '全局变量数量较多，按需向 GDB 读取下一批的当前值';
-          more.textContent = '加载更多全局变量（已显示 ' + globals.length + ' / ' + total + '）';
-          more.addEventListener('click', () => {
-            more.disabled = true;
-            more.textContent = '正在读取…';
-            vscode.postMessage({ type: 'loadMoreGlobals' });
-          });
-          el.globalsContainer.appendChild(more);
-        }
         el.globalsContainer.querySelectorAll('[data-seq-open]').forEach(btn => btn.addEventListener('click', () => {
           if (!currentContext) return;
           const variable = globals.find(v => v.name === btn.dataset.seqOpen);
@@ -1111,7 +1076,7 @@ function getDashboardHtml(options = {}) {
             overlay.hidden = false; requestSequence(Number(btn.dataset.offset));
           }));
           el.watchesContainer.querySelectorAll('[data-seq-index]').forEach(btn => btn.addEventListener('click', () => {
-            if (currentContext && btn.dataset.editable === '1') editSequence(btn.dataset.seqName, Number(btn.dataset.seqIndex), btn.dataset.curVal, btn.dataset.char === '1');
+            if (currentContext && btn.dataset.editable === '1') editSequence(btn.dataset.seqName, Number(btn.dataset.seqIndex), btn.dataset.curVal, btn.dataset.char === '1', btn.dataset.seqLabel);
           }));
           el.watchesContainer.querySelectorAll('[data-remove-watch]').forEach((btn) => {
             btn.addEventListener('click', () => {
@@ -1223,7 +1188,7 @@ function getDashboardHtml(options = {}) {
           sequenceMessage.textContent = sequenceState.scope === 'global' ? '只读；字符类型按字节索引。' : page.isChar ? '按字节索引；UTF-8 多字节字符会显示为多个字节。右击可插入或删除（仅支持 string 和 vector）。' : ((page.vectorOps || page.stringOps) ? '左键修改，右键删除或在两侧插入。' : '点击元素修改。');
           document.getElementById('sequenceRange').textContent = page.length ? (page.offset + 1) + '–' + (page.offset + page.items.length) + ' / ' + page.length : '空容器';
           prev.disabled = page.offset === 0; next.disabled = page.offset + page.items.length >= page.length;
-          sequenceCells.innerHTML = page.items.map(item => '<button class="array-cell" data-index="' + item.index + '" data-value="' + escapeHtml(item.editValue) + '"' + ((page.vectorOps || page.stringOps) ? ' data-vector-index="' + item.index + '" data-vector-name="' + escapeHtml(page.name) + '" data-vector-char="' + (page.isChar ? '1' : '0') + '" title="右击：删除或插入"' : '') + (!page.editable && !(page.vectorOps || page.stringOps) ? ' disabled' : '') + '><span class="array-idx">[' + item.index + ']</span><span class="array-v">' + escapeHtml(item.value) + '</span></button>').join('');
+          sequenceCells.innerHTML = page.items.map(item => '<button class="array-cell" data-index="' + item.index + '" data-value="' + escapeHtml(item.editValue) + '"' + ((page.vectorOps || page.stringOps) ? ' data-vector-index="' + item.index + '" data-vector-name="' + escapeHtml(page.name) + '" data-vector-char="' + (page.isChar ? '1' : '0') + '" title="右击：删除或插入"' : '') + (!page.editable && !(page.vectorOps || page.stringOps) ? ' disabled' : '') + '><span class="array-idx">' + escapeHtml(item.label || ('[' + item.index + ']')) + '</span><span class="array-v">' + escapeHtml(item.value) + '</span></button>').join('');
           sequenceCells.querySelectorAll('[data-index]').forEach(btn => btn.addEventListener('click', () => { if (page.editable) editSequence(page.name, Number(btn.dataset.index), btn.dataset.value, page.isChar); }));
         } else if (msg.type === 'sequenceEdited' && sequenceState && msg.requestId === sequenceRequest) {
           const offset = msg.name === sequenceState.name && Number.isSafeInteger(msg.length) ? Math.min(sequenceState.offset, Math.max(0, msg.length - 1)) : sequenceState.offset;
