@@ -613,6 +613,25 @@ function getDashboardHtml(options = {}) {
       text-align: center;
       padding: 12px 6px;
     }
+
+    .globals-more {
+      display: block;
+      width: 100%;
+      margin-top: 6px;
+      background: var(--bg-card-header);
+      border: 1px dashed var(--border-strong);
+      color: var(--fg-main);
+      cursor: pointer;
+      padding: 6px 10px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .globals-more:hover {
+      background: var(--bg-hover);
+      border-color: var(--border-focus);
+    }
+    .globals-more[disabled] { cursor: progress; opacity: .7; }
   </style>
 </head>
 <body>
@@ -1040,10 +1059,26 @@ function getDashboardHtml(options = {}) {
 
         // Globals are deliberately read-only; their symbol identity includes the source file.
         const globals = Array.isArray(snap.globals) && isPaused ? snap.globals : [];
-        el.globalsCount.textContent = globals.length + ' 项';
+        el.globalsCount.textContent = snap.globalsHasMore && Number(snap.globalsTotal) > globals.length
+          ? globals.length + ' / ' + Number(snap.globalsTotal) + ' 项'
+          : globals.length + ' 项';
         el.globalsInfo.textContent = !isPaused ? '暂停时展示源文件目录中的全局变量（只读）。' :
           (snap.globalsInfo || (globals.length ? '只读 · 包含当前源文件目录中的全局及文件静态变量' : '未发现可读取的全局变量。'));
         el.globalsContainer.innerHTML = globals.map(v => renderVariableCard(v, { isGlobal: true })).join('');
+        if (snap.globalsHasMore) {
+          const total = Number(snap.globalsTotal) || globals.length;
+          const more = document.createElement('button');
+          more.className = 'globals-more';
+          more.id = 'globalsMore';
+          more.title = '全局变量数量较多，按需向 GDB 读取下一批的当前值';
+          more.textContent = '加载更多全局变量（已显示 ' + globals.length + ' / ' + total + '）';
+          more.addEventListener('click', () => {
+            more.disabled = true;
+            more.textContent = '正在读取…';
+            vscode.postMessage({ type: 'loadMoreGlobals' });
+          });
+          el.globalsContainer.appendChild(more);
+        }
         el.globalsContainer.querySelectorAll('[data-seq-open]').forEach(btn => btn.addEventListener('click', () => {
           if (!currentContext) return;
           const variable = globals.find(v => v.name === btn.dataset.seqOpen);

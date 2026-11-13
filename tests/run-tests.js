@@ -552,6 +552,9 @@ int main() {
   await require('./global-tests').testGlobals();
   ok('Globals: GDB source symbols, shadowing, static variables, paging and exit');
 
+  await require('./global-large-tests').testLargeGlobals();
+  ok('Globals beyond 100 items, long arrays and multi-dimensional arrays stay inspectable');
+
   await require('./output-file-tests').testOutputFile();
   ok('Output file: large complete live output, safe paths and post-exit state cleanup');
 

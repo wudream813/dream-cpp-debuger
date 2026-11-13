@@ -48,7 +48,21 @@ async function testGlobals(){
  finally {await cs.stop();fs.rmSync(cdir,{recursive:true,force:true});}
  const fake=new GDBSession();fake.sourceFile='/tmp/proj/main.cpp';fake.state='paused';fake.proc={};
  fake.sendCommand=async()=>({results:{symbols:{debug:[{fullname:'/tmp/proj/main.cpp',symbols:Array.from({length:105},(_,i)=>({name:'v'+i,type:'int'}))}]}}});
- const capped=await fake._discoverGlobalSymbols();assert.equal(capped.symbols.length,100);assert(capped.info.includes('最多显示 100'));
+ // Discovery no longer truncates at 100: every symbol is kept and values are read lazily.
+ const discovered=await fake._discoverGlobalSymbols();
+ assert.equal(discovered.symbols.length,105);assert.equal(discovered.symbols[104].name,'v104');assert.equal(discovered.info,'');
+ // Values are read lazily: the first window is evaluated, loadMoreGlobals extends it.
+ fake.sendCommand=async(cmd)=>cmd.startsWith('-symbol-info-variables')
+   ? {results:{symbols:{debug:[{fullname:'/tmp/proj/main.cpp',symbols:Array.from({length:105},(_,i)=>({name:'v'+i,type:'int'}))}]}}}
+   : {results:{value:'1'}};
+ fake._globalSymbols=null;await fake._refreshGlobals();
+ assert.equal(fake.globals.length,100);assert.equal(fake.globalsTotal,105);
+ assert(fake.globalsInfo.includes('已显示 100 / 共 105 项'),fake.globalsInfo);
+ let fakeSnap=fake.getSnapshot();assert.equal(fakeSnap.globalsHasMore,true);assert.equal(fakeSnap.globalsTotal,105);
+ assert.equal(await fake.loadMoreGlobals(10),true);
+ assert.equal(fake.globals.length,110>105?105:110);assert.equal(fake.getSnapshot().globalsHasMore,false);
+ assert.equal(await fake.loadMoreGlobals(10),false);
+ fake.state='running';await assert.rejects(fake.loadMoreGlobals(10),/暂停/);fake.state='paused';
  fake._globalSymbols=null;fake.sendCommand=async()=>{throw Error('unsupported')};await fake._refreshGlobals();assert(fake.globalsInfo.includes('不支持'));
  fake._globalSymbols=[{id:'global_0',name:'broken',file:'/tmp/proj/main.cpp',line:4,type:'int',expression:'broken'}];
  await fake._refreshGlobals();

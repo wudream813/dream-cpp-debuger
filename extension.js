@@ -91,7 +91,8 @@ class DreamDebugController {
     this.compileQueue = Promise.resolve();
     this.session = new GDBSession({
       gdbPath: this.config.get('gdbPath', 'gdb'),
-      maxArrayPreview: this.config.get('maxArrayPreview', 16)
+      maxArrayPreview: this.config.get('maxArrayPreview', 16),
+      globalsPageSize: this.config.get('globalsPageSize', 100)
     });
 
     this.stdinMode = 'text';
@@ -569,6 +570,7 @@ class DreamDebugController {
 
         this.session.gdbPath = this.config.get('gdbPath', 'gdb');
         this.session.maxArrayPreview = this.config.get('maxArrayPreview', 16);
+        this.session.globalsPageSize = this.config.get('globalsPageSize', 100);
 
         let outputCapture = null;
         try {
@@ -1042,6 +1044,15 @@ class DreamDebugController {
         this.session.programOutput = '';
         this.pushSnapshotToWebview();
         break;
+      case 'loadMoreGlobals': {
+        try {
+          await this.session.loadMoreGlobals(this.config.get('globalsPageSize', 100));
+        } catch (err) {
+          vscode.window.showErrorMessage(`加载更多全局变量失败：${err.message}`);
+          this.pushSnapshotToWebview();
+        }
+        break;
+      }
       case 'addWatch':
         await this.session.addWatch(msg.expr);
         break;

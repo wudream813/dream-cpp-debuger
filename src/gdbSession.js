@@ -63,11 +63,27 @@ function quoteInferiorArgument(value) {
   return "'" + text.replace(/'/g, "'\\''") + "'";
 }
 
+// Global symbols are discovered once and evaluated in windows of this size.
+// The window is bounded so huge translation units never spam GDB with thousands
+// of synchronous -data-evaluate-expression round trips.
+const DEFAULT_GLOBALS_PAGE_SIZE = 100;
+const MAX_GLOBALS_PAGE_SIZE = 1000;
+const MAX_GLOBAL_SYMBOLS = 2000;
+
+function normalizeGlobalsPageSize(value) {
+  const size = Math.trunc(Number(value));
+  if (!Number.isFinite(size) || size < 1) return DEFAULT_GLOBALS_PAGE_SIZE;
+  return Math.min(size, MAX_GLOBALS_PAGE_SIZE);
+}
+
 class GDBSession extends EventEmitter {
   constructor(options = {}) {
     super();
     this.gdbPath = options.gdbPath || 'gdb';
     this.maxArrayPreview = options.maxArrayPreview || 16;
+    // Globals are evaluated lazily: all symbols are discovered, but only the
+    // first window is read from GDB so a large amount of globals stays usable.
+    this.globalsPageSize = normalizeGlobalsPageSize(options.globalsPageSize);
 
     this.proc = null;
     this.sessionId = 0;
@@ -97,6 +113,9 @@ class GDBSession extends EventEmitter {
     this.locals = [];
     this.globals = [];
     this._globalSymbols = null;
+    this.globalsLimit = this.globalsPageSize;
+    this.globalsTotal = 0;
+    this._globalsDiscoveryInfo = '';
     this.globalsInfo = '';
     this.prevGlobalValues = new Map();
     this.prevLocalValues = new Map();
@@ -157,6 +176,9 @@ class GDBSession extends EventEmitter {
     this.prevGlobalValues.clear();
     this._globalSymbols = null;
     this.globals = [];
+    this.globalsTotal = 0;
+    this.globalsLimit = this.globalsPageSize;
+    this._globalsDiscoveryInfo = '';
     this.globalsInfo = '';
     this.currentFrame = 0;
     this.inferiorPid = null;
@@ -897,8 +919,21 @@ class GDBSession extends EventEmitter {
     if (!/^[A-Za-z_]\w*$/.test(variable.name || '') || variable.kind === 'uninitialized') return null;
     if (/\bvector\s*</.test(type)) return /vector\s*<\s*bool\b/.test(type) ? null : 'vector';
     if (/^(?:std::)?(?:basic_string<char[^>]*>|string)$/.test(type.trim())) return 'string';
-    if (/^[^\[\]]+\[\d+\]$/.test(type.trim())) return /\bchar\s*\[/.test(type) ? 'chars' : 'array';
+    const dims = this._arrayDimensions(type);
+    if (dims) return dims.dims.length === 1 && /\bchar\s*$/.test(dims.base) ? 'chars' : 'array';
     return null;
+  }
+
+  /**
+   * Parse a C array type such as `int [200]` or `int [20][20]`.
+   * Returns { base, dims: [20, 20] } or null when the type is not a fixed array.
+   */
+  _arrayDimensions(rawType) {
+    const match = String(rawType || '').trim().match(/^([^\[\]]+?)\s*((?:\[\s*\d+\s*\])+)$/);
+    if (!match) return null;
+    const dims = match[2].match(/\[\s*(\d+)\s*\]/g).map(text => Number(text.replace(/[^0-9]/g, '')));
+    if (!dims.length || dims.some(size => !Number.isSafeInteger(size) || size < 0)) return null;
+    return { base: match[1].trim(), dims };
   }
 
   async _sequenceLength(name, kind) {
@@ -936,6 +971,10 @@ class GDBSession extends EventEmitter {
       const length = await this._sequenceLength(expression, kind);
       const isChar = kind === 'string' || kind === 'chars' || (kind === 'vector' && /vector\s*<\s*(?:signed |unsigned )?char\b/.test(rawType));
       const isStringElement = kind === 'vector' && this._vectorElementType(rawType) === 'string';
+      // Multi-dimensional arrays page over their outermost dimension (one row
+      // per item); a row cannot be assigned as a single value, so stay read-only.
+      const dims = kind === 'array' ? this._arrayDimensions(rawType) : null;
+      const multiDim = !!dims && dims.dims.length > 1;
       const previewCount = Math.min(length, Math.max(1, Math.min(this.maxArrayPreview, readOnly ? 8 : 32)));
       let items;
       if (isChar || isStringElement) {
@@ -946,12 +985,15 @@ class GDBSession extends EventEmitter {
       }
       // If GDB returned a shortened preview, never claim it is complete.
       const sequence = { kind, length, isChar, items, truncated: items.length < length,
-        editable: !readOnly && !/(?:^|\s)const(?:\s|$)/.test(rawType) };
+        editable: !readOnly && !multiDim && !/(?:^|\s)const(?:\s|$)/.test(rawType) };
+      if (multiDim) { sequence.elementEditable = false; sequence.dimensions = dims.dims; }
       if (isStringElement) sequence.elementEditable = false;
       if (kind === 'vector') sequence.vectorOps = sequence.editable && !!this._vectorElementType(rawType);
       if (kind === 'string') sequence.stringOps = sequence.editable && rawType.trim() === 'std::string';
       if (kind !== 'string' && kind !== 'chars') {
-        const prefix = kind === 'vector' ? `vector[${length}]` : `[${length}]`;
+        const prefix = kind === 'vector' ? `vector[${length}]`
+          : multiDim ? dims.dims.map((size, i) => `[${i === 0 ? length : size}]`).join('')
+          : `[${length}]`;
         formatted = { ...formatted, kind: 'array', elements: items.map(item => item.value),
           displayValue: `${prefix} { ${items.map(item => item.value).join(', ')}${sequence.truncated ? ', …' : ''} }` };
       } else if (formatted.displayValue.length > 180) {
@@ -1576,6 +1618,7 @@ class GDBSession extends EventEmitter {
     const debug = result?.results?.symbols?.debug || [];
     const groups = Array.isArray(debug) ? debug : [debug];
     const symbols = [];
+    const seen = new Set();
     let enumerated = 0, skippedUnsafe = false;
     for (const group of groups) {
       const list = Array.isArray(group.symbols) ? group.symbols : group.symbols ? [group.symbols] : [];
@@ -1588,16 +1631,23 @@ class GDBSession extends EventEmitter {
       const fileForGdb = file.replace(/\\/g, '/');
       if (/[\r\n\0'"]/.test(fileForGdb)) { skippedUnsafe = true; continue; }
       for (const symbol of list) {
+        if (symbols.length >= MAX_GLOBAL_SYMBOLS) break;
         const name = String(symbol.name || '').replace(/\[abi:[A-Za-z0-9_]+\]/g, '');
         if (!/^[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*$/.test(name) || /^(?:std|__gnu_cxx)::/.test(name) || name.split('::').some(part => part.startsWith('__'))) continue;
         const expression = `'${fileForGdb}'::${name}`;
-        if (symbols.some(item => item.expression === expression)) continue;
+        if (seen.has(expression)) continue;
+        seen.add(expression);
         symbols.push({ id: 'global_' + symbols.length, name, file, line: Number(symbol.line) || 0,
           type: cleanCppType(symbol.type || ''), expression });
       }
     }
-    const limited = symbols.length > 100 || enumerated >= 2000;
-    return { symbols: symbols.slice(0, 100), info: limited ? '全局变量数量较多，最多显示 100 项，部分符号可能未列出。' : skippedUnsafe ? '部分路径含特殊字符的符号未列出。' : '' };
+    // Discovery is intentionally uncapped below MAX_GLOBAL_SYMBOLS: values are
+    // evaluated lazily in windows (see _refreshGlobals), so declaring hundreds
+    // of globals no longer hides the ones beyond the first page.
+    const capped = symbols.length >= MAX_GLOBAL_SYMBOLS || enumerated >= MAX_GLOBAL_SYMBOLS;
+    const info = capped ? `全局变量数量极多，最多列出 ${MAX_GLOBAL_SYMBOLS} 项，部分符号可能未列出。`
+      : skippedUnsafe ? '部分路径含特殊字符的符号未列出。' : '';
+    return { symbols, info };
   }
 
   async _refreshGlobals() {
@@ -1608,10 +1658,13 @@ class GDBSession extends EventEmitter {
         const result = await this._discoverGlobalSymbols();
         if (!same()) return;
         this._globalSymbols = result.symbols;
-        this.globalsInfo = result.info;
+        this._globalsDiscoveryInfo = result.info;
+        this.globalsLimit = this.globalsPageSize;
       }
+      this.globalsTotal = this._globalSymbols.length;
+      const visible = this._globalSymbols.slice(0, this._globalsWindowSize());
       const entries = [];
-      for (const sym of this._globalSymbols) {
+      for (const sym of visible) {
         if (!same()) return;
         try {
           const safeExpr = sym.expression.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
@@ -1633,14 +1686,52 @@ class GDBSession extends EventEmitter {
             displayValue: '无法读取', tooltip: '可能未初始化或已被优化', elements: null, changed: false });
         }
       }
-      if (same()) this.globals = entries;
+      if (same()) {
+        this.globals = entries;
+        this.globalsInfo = this._globalsInfoText();
+      }
     } catch (_) {
       if (same()) {
         this.globals = [];
         this._globalSymbols = [];
+        this.globalsTotal = 0;
+        this._globalsDiscoveryInfo = '';
         this.globalsInfo = '无法列出全局变量；当前 GDB 可能不支持符号查询。';
       }
     }
+  }
+
+  /** Number of global symbols whose current value should be read from GDB. */
+  _globalsWindowSize() {
+    const limit = Math.trunc(Number(this.globalsLimit));
+    if (!Number.isFinite(limit) || limit < 1) return this.globalsPageSize;
+    return Math.min(limit, MAX_GLOBAL_SYMBOLS);
+  }
+
+  _globalsInfoText() {
+    const total = Array.isArray(this._globalSymbols) ? this._globalSymbols.length : 0;
+    const shown = this.globals.length;
+    const parts = [this._globalsDiscoveryInfo || ''];
+    if (total > shown) parts.push(`已显示 ${shown} / 共 ${total} 项，点击“加载更多”继续。`);
+    return parts.filter(Boolean).join(' ');
+  }
+
+  /**
+   * Evaluate the next window of global symbols. Values are read lazily so a
+   * translation unit with hundreds of globals neither stalls every refresh nor
+   * hides the symbols that come after the first page.
+   */
+  async loadMoreGlobals(count) {
+    if (this.state !== 'paused' || !this.proc) throw new Error('仅在暂停时才能加载更多全局变量');
+    if (!Array.isArray(this._globalSymbols) || this._globalSymbols.length <= this.globals.length) return false;
+    const step = Math.trunc(Number(count));
+    const increment = Number.isFinite(step) && step > 0 ? step : this.globalsPageSize;
+    const target = Math.min(this._globalSymbols.length, this.globals.length + increment);
+    if (target <= this.globals.length) return false;
+    this.globalsLimit = target;
+    await this._refreshGlobals();
+    this._emitSnapshot();
+    return true;
   }
 
   async _refreshWatches() {
@@ -1980,6 +2071,8 @@ class GDBSession extends EventEmitter {
       stack: inactive ? [] : this.stack,
       locals: inactive ? [] : this.locals,
       globals: inactive ? [] : this.globals,
+      globalsTotal: inactive ? 0 : (this._globalSymbols ? this._globalSymbols.length : this.globals.length),
+      globalsHasMore: !inactive && !!this._globalSymbols && this.globals.length < this._globalSymbols.length,
       globalsInfo: inactive ? '' : this.globalsInfo,
       watches: inactive ? this.watches.map(w => ({ ...w, value: '程序已结束', type: '', kind: 'scalar', elements: null, error: null })) : this.watches,
       breakpoints: this.getBreakpointsList(),
