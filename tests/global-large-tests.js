@@ -228,6 +228,19 @@ async function testLargeGlobals() {
     const textPage = await hugeSession.getSequencePage(text.name, 99998, 2, ctx, 'global');
     assert.equal(textPage.items[textPage.items.length - 1].value, 'A');
 
+    // Degradation path: even when GDB refuses the bulk read (old GDB without
+    // max-value-size), the variable stays pageable instead of "无法读取".
+    await hugeSession.sendCommand('-gdb-set max-value-size 65536');
+    await hugeSession.refreshState();
+    const degraded = hugeSession.globals.find(v => v.displayName === 'gbig');
+    assert(degraded && degraded.sequence, 'a refused bulk read must still stay pageable');
+    assert.equal(degraded.sequence.length, 100000);
+    assert.match(degraded.tooltip || '', /按元素按需读取/);
+    const degradedPage = await hugeSession.getSequencePage(degraded.name, 99998, 2, ctx, 'global');
+    assert.equal(degradedPage.items[degradedPage.items.length - 1].value, '42');
+    await hugeSession.sendCommand('-gdb-set max-value-size unlimited');
+    await hugeSession.refreshState();
+
     // Large local arrays stay readable and writable.
     const lbig = hugeSession.locals.find(v => v.name === 'lbig');
     assert(lbig && lbig.sequence, 'local int [100000] must be inspectable');
