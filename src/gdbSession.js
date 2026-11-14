@@ -131,6 +131,9 @@ class GDBSession extends EventEmitter {
     this.stdinFifoFd = null;
     this.stdoutFile = null;
     this.outputCapture = null;
+    this.reverseFileIO = null;
+    this.reverseSink = null;
+    this.reverseFinish = null;
     this.stdoutReadOffset = 0;
     this.stdoutTimer = null;
     this._outputLimitReached = false;
@@ -150,10 +153,15 @@ class GDBSession extends EventEmitter {
   async start(config = {}) {
     let handedToProcess = false;
     const release = typeof config.cleanupBuild === 'function' ? config.cleanupBuild : null;
+    const reverse = config.reverseFileIO || null;
     try {
       return await this._startSession(config, () => { handedToProcess = true; });
     } finally {
-      if (release && !handedToProcess) { try { release(); } catch (_) {} }
+      if (!handedToProcess) {
+        if (reverse) { try { reverse.cleanup(); } catch (_) {} }
+        if (config.reverseSink) await config.reverseSink.close().catch(() => {});
+        if (release) { try { release(); } catch (_) {} }
+      }
     }
   }
 
@@ -166,6 +174,7 @@ class GDBSession extends EventEmitter {
     this.executable = config.executable;
     this.sourceFile = config.sourceFile || null;
     const rawCwd = config.cwd || (this.executable ? path.dirname(this.executable) : process.cwd());
+    if (config.cwd && (!fs.existsSync(rawCwd) || !fs.statSync(rawCwd).isDirectory())) throw Error(`工作目录不存在或不是文件夹：${rawCwd}`);
     this.cwd = rawCwd && fs.existsSync(rawCwd) ? rawCwd : process.cwd();
     this.state = 'starting';
     this.programOutput = '';
@@ -196,7 +205,10 @@ class GDBSession extends EventEmitter {
     this.stdinMode = stdinMode;
     this.stdinClosed = false;
 
-    if (stdinMode === 'file' && config.stdinFile && fs.existsSync(config.stdinFile)) {
+    if (config.reverseFileIO && config.reverseFileIO.inputPath && stdinMode === 'stream') {
+      this.stdinFifoFd = config.reverseFileIO.takeStreamFd();
+      fs.writeFileSync(sessionStdinTarget, '', 'utf8');
+    } else if (stdinMode === 'file' && config.stdinFile && fs.existsSync(config.stdinFile)) {
       sessionStdinTarget = path.resolve(config.stdinFile);
     } else if (stdinMode === 'stream' && process.platform !== 'win32') {
       const fifoPath = path.join(sessionTempDir, 'stdin.fifo');
@@ -219,6 +231,8 @@ class GDBSession extends EventEmitter {
     this.stdinFile = sessionStdinTarget;
     this.stdoutFile = sessionStdoutFile;
     this.outputCapture = config.outputCapture || null;
+    this.reverseFileIO = config.reverseFileIO || null;
+    this.reverseSink = config.reverseSink || null;
 
     // Validate and quote before spawning, so invalid paths cannot leave a GDB
     // process or FIFO behind.
@@ -253,8 +267,45 @@ class GDBSession extends EventEmitter {
       if (typeof config.cleanupBuild === 'function') {
         const release = config.cleanupBuild;
         proc.once('close', () => releaseWhenSafe(release, inferiorTracker));
-        transferBuild();
       }
+      if (config.reverseFileIO) {
+        const reverse = config.reverseFileIO, sink = config.reverseSink || null;
+        const lifecycle = { deliberate: false, signal: false };
+        this._reverseLifecycle = lifecycle;
+        this.reverseFinish = new Promise(resolve => {
+          proc.once('close', () => {
+            const finish = async () => {
+              let dead = !inferiorTracker.launchAttempted || inferiorTracker.exited;
+              if (!dead && lifecycle.deliberate && Number.isSafeInteger(inferiorTracker.pid) && inferiorTracker.pid > 0) {
+                for (let i = 0; i < 20 && !dead; i++) {
+                  try { process.kill(inferiorTracker.pid, 0); } catch (err) { if (err.code === 'ESRCH') dead = true; }
+                  if (!dead) await new Promise(r => setTimeout(r, 100));
+                }
+              }
+              if (!dead || lifecycle.signal || reverse.conflicted || (inferiorTracker.launchAttempted && !inferiorTracker.exited && !lifecycle.deliberate)) {
+                reverse.preserve('程序异常退出或进程状态不明');
+              } else {
+                try {
+                  do {
+                    const text = reverse.poll(sink ? sink.fd : null, false);
+                    if (text && this.reverseFileIO === reverse) {
+                      this.programOutput = appendBounded(this.programOutput, text);
+                      this.emit('output', { category: 'stdout', text });
+                    }
+                    if (reverse.pending()) await new Promise(r => setImmediate(r));
+                  } while (reverse.pending());
+                  const tail = reverse.poll(sink ? sink.fd : null, true);
+                  if (tail && this.reverseFileIO === reverse) { this.programOutput = appendBounded(this.programOutput, tail); this.emit('output', { category: 'stdout', text: tail }); }
+                  reverse.cleanup();
+                } catch (err) { reverse.preserve(`输出或恢复失败：${err.message}`); }
+              }
+              if (sink) await sink.close().catch(() => {});
+            };
+            void finish().catch(err => { try { reverse.preserve(`清理失败：${err.message}`); } catch (_) {} }).finally(resolve);
+          });
+        });
+      }
+      if (typeof config.cleanupBuild === 'function' || config.reverseFileIO) transferBuild();
     } catch (err) {
       this.state = 'error';
       this.emit('status', { state: 'error', reason: err.message });
@@ -676,6 +727,8 @@ class GDBSession extends EventEmitter {
     this.closeStdin();
 
     const oldProc = this.proc;
+    if (oldProc && this._reverseLifecycle) this._reverseLifecycle.deliberate = true;
+    const reverseFinish = this.reverseFinish;
     const oldTempDir = this.tempDir;
     this.proc = null;
     this.stdoutBuffer = '';
@@ -718,8 +771,10 @@ class GDBSession extends EventEmitter {
       });
     }
 
+    if (reverseFinish) { let timer; await Promise.race([reverseFinish, new Promise(resolve => { timer = setTimeout(resolve, 4000); })]); clearTimeout(timer); }
     this._pollProgramOutput(true);
     if (this.outputCapture) { await this.outputCapture.close().catch(() => {}); this.outputCapture = null; }
+    this.reverseFileIO = null; this.reverseSink = null; this.reverseFinish = null; this._reverseLifecycle = null;
     this._clearInspectionState();
     this._cleanupTempFiles(oldTempDir);
 
@@ -1971,6 +2026,7 @@ class GDBSession extends EventEmitter {
     ) {
       const exitCode = results['exit-code'] ? parseInt(results['exit-code'], 8) : 0;
       if (this._inferiorTracker) this._inferiorTracker.exited = true;
+      if ((reason === 'exited-signalled' || exitCode !== 0) && this._reverseLifecycle) this._reverseLifecycle.signal = true;
       this.state = 'exited';
       this.stopLocation = null;
       this.emit('output', {
@@ -2090,6 +2146,15 @@ class GDBSession extends EventEmitter {
   }
 
   _pollProgramOutput(final = false) {
+    if (this.reverseFileIO) {
+      try {
+        const text = this.reverseFileIO.poll(this.reverseSink ? this.reverseSink.fd : null, false);
+        if (text) { this.programOutput = appendBounded(this.programOutput, text); this.emit('output', { category: 'stdout', text }); this._emitSnapshot(); }
+      } catch (err) {
+        this.reverseFileIO.conflicted = true;
+        if (!this.reverseFileIO.warned) { this.reverseFileIO.warned = true; this.emit('output', { category: 'system', text: `[Dream GDB] 反文件输出读取失败：${err.message}` }); }
+      }
+    }
     if (this.outputCapture) {
       try {
         const text = this.outputCapture.poll(final);

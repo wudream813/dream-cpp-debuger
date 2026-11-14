@@ -470,6 +470,26 @@ function getSidebarHtml(options = {}) {
     </div>
   </div>
 
+  <div class="card">
+    <div class="card-header"><span>文件读写</span><button id="ioReset" class="small-action" title="清除手动修改，重新读取源码头部">读取源码配置</button></div>
+    <div class="card-body">
+      <div class="hint-label">自动读取源码前 50 行的编译器格式注释；此处修改仅对当前源文件生效。</div>
+      <label><input id="ioFileIO" type="checkbox"> 文件输入输出</label>
+      <div class="btn-stack" style="margin:6px 0 10px">
+        <input id="ioInputFile" class="text-input" placeholder="输入文件；CON 使用下方输入" aria-label="文件输入路径">
+        <input id="ioOutputFile" class="text-input" placeholder="输出文件；CON 使用下方输出" aria-label="文件输出路径">
+      </div>
+      <label><input id="ioReverseIO" type="checkbox"> 反文件输入输出（程序自行打开文件）</label>
+      <div class="btn-stack" style="margin:6px 0 10px">
+        <input id="ioReverseInput" class="text-input" placeholder="程序读取的文件名；CON 不替换" aria-label="反文件输入名">
+        <input id="ioReverseOutput" class="text-input" placeholder="程序写入的文件名；CON 不替换" aria-label="反文件输出名">
+        <input id="ioWorkDir" class="text-input" placeholder="工作目录，例如 &lt;cppDir&gt;" aria-label="工作目录">
+        <input id="ioCustomVariable" class="text-input" placeholder="自定义变量 &lt;var&gt;" aria-label="自定义变量">
+      </div>
+      <div class="hint-label">反文件在原工作目录中临时替换；正常结束后恢复已有文件。异常或冲突时保留备份和锁。</div>
+    </div>
+  </div>
+
   <!-- 2. Standard Input (stdin) Card with 3 Modes: Text / Stream / File -->
   <div class="card">
     <div class="card-header">
@@ -602,6 +622,12 @@ function getSidebarHtml(options = {}) {
         });
       });
 
+      const ioFields = { fileIO: 'ioFileIO', reverseIO: 'ioReverseIO', inputFile: 'ioInputFile', outputFile: 'ioOutputFile', reverseInput: 'ioReverseInput', reverseOutput: 'ioReverseOutput', workDir: 'ioWorkDir', customVariable: 'ioCustomVariable' };
+      for (const [key, id] of Object.entries(ioFields)) {
+        const input = document.getElementById(id);
+        input.addEventListener('change', () => vscode.postMessage({ type: 'updateFileIOConfig', key, value: input.type === 'checkbox' ? input.checked : input.value }));
+      }
+      document.getElementById('ioReset').addEventListener('click', () => vscode.postMessage({ type: 'resetFileIOConfig' }));
       el.btnUserMode.addEventListener('click', () => vscode.postMessage({ type: 'changeUserMode' }));
 
       el.btnStartDebug.addEventListener('click', () => {
@@ -773,6 +799,14 @@ function getSidebarHtml(options = {}) {
           el.targetFileName.textContent = fname;
         }
 
+        if (snap.fileIOConfig) {
+          for (const [key, id] of Object.entries(ioFields)) {
+            const input = document.getElementById(id);
+            if (document.activeElement === input) continue;
+            if (input.type === 'checkbox') input.checked = !!snap.fileIOConfig[key];
+            else input.value = snap.fileIOConfig[key] || '';
+          }
+        }
         if (typeof snap.stdinText === 'string' && document.activeElement !== el.stdinTextarea) {
           el.stdinTextarea.value = snap.stdinText;
         }

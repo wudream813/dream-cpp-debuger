@@ -21,6 +21,8 @@ const { DreamGdbDebugAdapter } = require('./src/debugAdapter');
 const { EditorReadOnly } = require('./src/editorReadOnly');
 const { compileDebugWithCompanion } = require('./src/compilerIntegration');
 const { withCompileNotification } = require('./src/compileProgress');
+const { parseHeader, resolveIOConfig } = require('./src/fileIOConfig');
+const { prepareReverseFileIO } = require('./src/reverseFileIO');
 
 function initialUserMode(config, globalState) {
   const inspected = config.inspect('interfaceMode');
@@ -100,6 +102,8 @@ class DreamDebugController {
     this.stdinFile = '';
     this.stdinFilePreview = '';
     this.outputFile = '';
+    this.fileIOOverrides = new Map();
+    this.headerConfigCache = new Map();
     this.streamHistory = [];
     this.runId = 0;
     this.resettingRunId = null;
@@ -443,11 +447,30 @@ class DreamDebugController {
     return valid;
   }
 
+  getRawFileIOConfig(sourceFile) {
+    if (!sourceFile) return null;
+    this.fileIOOverrides ||= new Map(); this.headerConfigCache ||= new Map();
+    let header = {};
+    try {
+      const st = fs.statSync(sourceFile), signature = `${st.mtimeMs}:${st.size}`;
+      let cached = this.headerConfigCache.get(sourceFile);
+      if (!cached || cached.signature !== signature) {
+        const fd = fs.openSync(sourceFile, 'r'); let text;
+        try { const buf = Buffer.alloc(256 * 1024); const n = fs.readSync(fd, buf, 0, buf.length, 0); text = buf.subarray(0, n).toString('utf8'); }
+        finally { fs.closeSync(fd); }
+        cached = { signature, header: parseHeader(text) }; this.headerConfigCache.set(sourceFile, cached);
+      }
+      header = cached.header;
+    } catch (_) {}
+    return { fileIO: false, reverseIO: false, inputFile: '<base>.in', outputFile: '<base>.out', reverseInput: '<base>.in', reverseOutput: '<base>.out', customVariable: '', workDir: '<cppDir>', ...header, ...(this.fileIOOverrides.get(sourceFile) || {}) };
+  }
+
   pushSnapshotToWebview() {
     const snap = this.session.getSnapshot();
     if (this.resettingRunId === this.runId) snap.programOutput = '';
     const activeFile = this.resolveActiveSourceFile();
     snap.activeFileName = activeFile ? path.basename(activeFile) : '';
+    snap.fileIOConfig = this.getRawFileIOConfig(activeFile);
     snap.stdinMode = this.stdinMode;
     snap.stdinText = this.stdinText;
     snap.stdinFile = this.stdinFile;
@@ -479,14 +502,7 @@ class DreamDebugController {
       return;
     }
 
-    const resolvedStdinFile =
-      this.stdinMode === 'file' ? this.resolveStdinFilePath(this.stdinFile, sourceFile) : '';
-    if (this.stdinMode === 'file' && (!resolvedStdinFile || !(await this.updateStdinFileInfo(this.stdinFile)))) {
-      vscode.window.showWarningMessage('请先选择一个有效的本地输入文件 (.in / .txt)，或切换到文本预设/流式输入模式。');
-      return;
-    }
-
-    const selectedOutputFile = this.outputFile || '';
+    let resolvedStdinFile = '', selectedOutputFile = '', effectiveStdinMode = this.stdinMode, ioConfig;
     this.activeCompileAbort?.abort();
     const runId = ++this.runId;
     this.quickRunId = null;
@@ -507,6 +523,27 @@ class DreamDebugController {
       return;
     }
 
+    try {
+      this.headerConfigCache?.delete(sourceFile);
+      const raw = this.getRawFileIOConfig(sourceFile);
+      const workspace = vscode.workspace.getWorkspaceFolder?.(vscode.Uri.file(sourceFile))?.uri?.fsPath || path.dirname(sourceFile);
+      ioConfig = resolveIOConfig(sourceFile, raw, {}, workspace);
+      if (!fs.statSync(ioConfig.cwd).isDirectory()) throw new Error('工作目录不是文件夹');
+      const consoleName = name => !name || /^CON$/i.test(name);
+      const checkDevice = name => { const base = name.split(/[\\/]/).pop(); if (/^(CON|NUL|AUX|PRN|CONIN\$|CONOUT\$|COM[1-9]|LPT[1-9])(?:\..*)?$/i.test(base) || /^\/dev\//.test(name)) throw new Error(`暂不支持将设备路径用作文件重定向：${name}；使用 CON 表示侧栏输入或输出`); };
+      const activeNames = [...(ioConfig.fileIO ? [ioConfig.inputFile, ioConfig.outputFile] : []), ...(ioConfig.reverseIO ? [ioConfig.reverseInput, ioConfig.reverseOutput] : [])];
+      for (const name of activeNames) if (name && !consoleName(name)) checkDevice(name);
+      if (ioConfig.fileIO && !consoleName(ioConfig.inputFile)) {
+        effectiveStdinMode = 'file'; resolvedStdinFile = path.resolve(ioConfig.cwd, ioConfig.inputFile);
+        const { handle } = await require('./src/safeFiles').openRegularFile(resolvedStdinFile); await handle.close();
+      } else if (this.stdinMode === 'file') {
+        resolvedStdinFile = this.resolveStdinFilePath(this.stdinFile, sourceFile);
+        if (!resolvedStdinFile || !(await this.updateStdinFileInfo(this.stdinFile))) throw new Error('请先选择有效的侧栏输入文件');
+      }
+      selectedOutputFile = ioConfig.fileIO && !consoleName(ioConfig.outputFile) ? path.resolve(ioConfig.cwd, ioConfig.outputFile) : (this.outputFile || '');
+      ioConfig.inputName = ioConfig.reverseIO && !consoleName(ioConfig.reverseInput) ? ioConfig.reverseInput : '';
+      ioConfig.outputName = ioConfig.reverseIO && !consoleName(ioConfig.reverseOutput) ? ioConfig.reverseOutput : '';
+    } catch (err) { vscode.window.showWarningMessage(`文件读写设置无效：${err.message}`); return; }
     this.sidebarProvider.reveal();
     this.config = vscode.workspace.getConfiguration('dreamCppDebug');
 
@@ -573,25 +610,30 @@ class DreamDebugController {
         this.session.maxVisibleVariables = Math.max(1,
           Math.min(1000, Math.trunc(Number(this.config.get('maxVisibleVariables', 15))) || 15));
 
-        let outputCapture = null;
+        let outputCapture = null, reverseFileIO = null, reverseSink = null, handed = false;
         try {
+          if (ioConfig.inputName || ioConfig.outputName) {
+            reverseFileIO = await prepareReverseFileIO({ cwd: ioConfig.cwd, inputName: ioConfig.inputName, outputName: ioConfig.outputName,
+              stdinMode: effectiveStdinMode, stdin: this.stdinText, stdinFile: resolvedStdinFile,
+              protectedPaths: [sourceFile, compileResult.executable], outputFile: selectedOutputFile,
+              onWarning: msg => { this.outputChannel.appendLine(`[反文件] ${msg}`); void vscode.window.showWarningMessage(msg); } });
+            if (runId !== this.runId) { reverseFileIO.cleanup(); return; }
+          }
           if (selectedOutputFile) {
             if (process.platform !== 'linux') throw new Error('调试输出到文件目前仅支持 Linux');
-            outputCapture = await openOutputFile(selectedOutputFile, [sourceFile, resolvedStdinFile, compileResult.executable], { shouldProceed: () => runId === this.runId });
-            if (runId !== this.runId) { await outputCapture.close(); return; }
+            const capture = await openOutputFile(selectedOutputFile, [sourceFile, resolvedStdinFile, compileResult.executable, reverseFileIO?.inputPath, reverseFileIO?.outputPath], { shouldProceed: () => runId === this.runId });
+            if (reverseFileIO?.outputPath) reverseSink = capture; else outputCapture = capture;
+            if (runId !== this.runId) return;
           }
           const cleanupBuild = releaseBuild;
-          releaseBuild = null; // The session owns it from this point, even if start fails.
+          releaseBuild = null;
+          handed = true;
           await this.session.start({
-            cleanupBuild,
-            outputCapture,
-            executable: compileResult.executable,
-            sourceFile,
-            cwd: path.dirname(sourceFile),
-            stdinMode: this.stdinMode,
-            stdin: this.stdinMode === 'text' ? this.stdinText : '',
-            stdinFile: resolvedStdinFile,
-            stopAtMain: this.config.get('stopAtMain', true)
+            cleanupBuild, outputCapture, reverseFileIO, reverseSink,
+            executable: compileResult.executable, sourceFile, cwd: ioConfig.cwd,
+            stdinMode: effectiveStdinMode,
+            stdin: effectiveStdinMode === 'text' ? this.stdinText : '',
+            stdinFile: resolvedStdinFile, stopAtMain: this.config.get('stopAtMain', true)
           });
         } catch (err) {
           if (runId === this.runId) {
@@ -599,6 +641,8 @@ class DreamDebugController {
             vscode.window.showErrorMessage(`启动调试失败: ${err.message}`);
           }
           if (outputCapture) await outputCapture.close().catch(() => {});
+        } finally {
+          if (!handed) { if (reverseFileIO) reverseFileIO.cleanup(); if (reverseSink) await reverseSink.close().catch(() => {}); if (outputCapture) await outputCapture.close().catch(() => {}); }
         }
       } finally {
         if (releaseBuild) releaseBuild();
@@ -989,6 +1033,23 @@ class DreamDebugController {
       case 'stop':
         await this.stopExecution();
         break;
+      case 'updateFileIOConfig': {
+        const source = this.resolveActiveSourceFile();
+        const keys = ['fileIO', 'reverseIO', 'inputFile', 'outputFile', 'reverseInput', 'reverseOutput', 'workDir', 'customVariable'];
+        if (source && keys.includes(msg.key)) {
+          this.fileIOOverrides ||= new Map();
+          const old = this.fileIOOverrides.get(source) || {};
+          const value = ['fileIO', 'reverseIO'].includes(msg.key) ? !!msg.value : String(msg.value || '').slice(0, 4096);
+          this.fileIOOverrides.set(source, { ...old, [msg.key]: value });
+          this.pushSnapshotToWebview();
+        }
+        break;
+      }
+      case 'resetFileIOConfig': {
+        const source = this.resolveActiveSourceFile();
+        if (source) { this.fileIOOverrides?.delete(source); this.headerConfigCache?.delete(source); this.pushSnapshotToWebview(); }
+        break;
+      }
       case 'updateStdinMode':
         this.stdinMode = msg.mode || 'text';
         break;

@@ -591,6 +591,24 @@ int main() {
   await require('./compiler-integration-tests').testCompilerIntegration();
   ok('Optional compiler integration, compatibility and fallback');
 
+  require('./file-io-config-tests').testFileIOConfig();
+  ok('Compiler-style file I/O header parsing and overrides');
+
+  await require('./reverse-file-tests').testReverseFileIO();
+  ok('Reverse file I/O backup and conflict handling');
+
+  await require('./reverse-integration-tests').testReverseIntegration();
+  ok('Reverse file I/O with real GDB, live file output and streaming input');
+
+  await require('./reverse-lifecycle-tests').testReverseLifecycle();
+  ok('Reverse file I/O stop, conflict and abnormal-exit handling');
+
+  await require('./file-io-controller-tests').testFileIOController();
+  ok('Source header and combined file I/O through the debugger controller');
+
+  require('./file-io-ui-tests').testFileIOUI();
+  ok('File I/O sidebar settings and reload controls');
+
   console.log(`\n🎉 All ${passed} tests passed!`);
 }
 
